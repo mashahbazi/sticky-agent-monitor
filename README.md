@@ -12,7 +12,16 @@ glance which sessions are **busy**, **waiting for input**, **done**, or in an
 
 - **Live session list** — reads `~/.claude/sessions/*.json` and updates in place.
 - **Color-coded status badges** — waiting, blocked, error, busy, idle, done, stopped.
-- **Smart sorting** — sessions needing your attention float to the top.
+- **Readable titles** — if a session hasn't been given a friendly name yet, the
+  monitor recovers its original task description from the session transcript
+  instead of showing a bare hash like `125f85a7`.
+- **`claude agents` control view flagged separately** — launching `claude
+  agents` leaves an idle standby worker registered in
+  `~/.claude/sessions/*.json`, indistinguishable at a glance from a real
+  working agent. The monitor detects it and tags it with a distinct purple
+  **CONTROL** badge instead of counting it as an active agent.
+- **Smart sorting** — sessions needing your attention float to the top;
+  control-view entries sink near the bottom.
 - **Click to attach** (macOS) — click any session row to open a new Terminal.app
   window pre-filtered to that session's background agent (`claude agents --cwd
   <dir>`); press Enter once to attach.
@@ -123,6 +132,26 @@ Each session JSON file is expected to contain fields such as `status`, `name`,
 colored badge and sort priority, then updates the existing row widgets in
 place on every poll to avoid flicker. State transitions (e.g.
 `busy → waiting`) trigger native OS notifications.
+
+**Title recovery.** Claude only auto-renames a session away from its
+generated id once it's made enough progress to summarize the task; until
+then (or if it never does), `name` just equals the id. When that happens,
+the monitor reads `~/.claude/projects/<cwd-with-slashes-as-dashes>/<sessionId
+>.jsonl` and pulls the first genuine user message as the title, skipping
+synthetic wrapper content (local-command caveats, bare slash-command
+invocations with no arguments) and unwrapping `<command-args>` when the task
+was given via a slash command. Results are cached per session for the life
+of the process, since a session's original task never changes.
+
+**Control-view detection.** `claude agents` keeps an idle spare worker on
+standby in whichever directory it's launched from, ready to dispatch a new
+task the instant you type one — and that standby worker gets its own entry
+in `~/.claude/sessions/*.json`, styled identically to a real agent. The
+monitor tells the two apart with a heuristic: a session is treated as a
+control-view standby only while it has an `agent` field set, is still
+`idle`, and was never renamed away from its id. The moment you actually
+dispatch a task from within `claude agents`, that session picks up real
+work and naturally falls out of this bucket on the next poll.
 
 Clicking a row runs an AppleScript that opens Terminal.app and runs
 `claude agents --cwd <cwd>`, which lists only the background agent(s) running

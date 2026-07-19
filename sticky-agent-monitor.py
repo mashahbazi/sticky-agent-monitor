@@ -16,6 +16,7 @@ Requires: Python 3.10+ (tkinter is included with Python on macOS/Windows)
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -53,6 +54,15 @@ STATUS_STYLES = {
     "stopped":       ("#F3F4F6", "#6B7280", "STOPPED",     6),
 }
 DEFAULT_STYLE = ("#F3F4F6", "#374151", "UNKNOWN", 99)
+
+# `claude agents` (the background-agent control TUI) keeps an idle spare
+# worker on standby in whichever directory it's launched from, ready to
+# dispatch a new task the moment you type one. That standby worker shows up
+# in ~/.claude/sessions/*.json exactly like any other session, but it never
+# received a real task -- it's still idle and still named after its own
+# auto-generated id. We tag those distinctly so they don't get confused with
+# actual working agents. (bg, fg, label, sort priority)
+CONTROL_STYLE = ("#EDE9FE", "#5B21B6", "CONTROL", 50)
 
 # Statuses that trigger notifications when transitioned INTO
 NOTIFY_WAITING = {"waiting", "needs_input"}
@@ -104,6 +114,106 @@ def attach_session(session: dict):
         pass
 
 
+def is_control_session(session: dict) -> bool:
+    """True if this is `claude agents`' own idle standby worker, not a real
+    working agent. See the CONTROL_STYLE comment for why this check works."""
+    job_id = session.get("jobId")
+    return (
+        bool(session.get("agent"))
+        and session.get("status", "").lower() == "idle"
+        and job_id is not None
+        and session.get("name") == job_id
+    )
+
+
+def _extract_text(content) -> str | None:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text")
+    return None
+
+
+_COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+
+
+def _candidate_title(text: str) -> str | None:
+    """Pull a usable one-line title out of a raw transcript message, or None
+    if this message is just wrapper/caveat noise rather than real content."""
+    text = text.strip()
+    if not text:
+        return None
+
+    # Slash-command invocations wrap the real task in <command-args>...</command-args>.
+    args_match = _COMMAND_ARGS_RE.search(text)
+    if args_match:
+        args = args_match.group(1).strip()
+        return args or None  # empty args (e.g. bare "/clear") isn't a useful title
+
+    # Other synthetic wrapper content (caveats, tool/system tags) starts with "<".
+    if text.startswith("<"):
+        return None
+
+    return text
+
+
+_first_message_cache: dict[str, str] = {}
+
+
+def _first_user_message(cwd: str, session_id: str) -> str | None:
+    """Read the session's transcript to recover its original task, for
+    sessions Claude hasn't gotten around to auto-naming yet."""
+    if session_id in _first_message_cache:
+        return _first_message_cache[session_id] or None
+
+    project_dir = cwd.replace("/", "-")
+    path = Path.home() / ".claude" / "projects" / project_dir / f"{session_id}.jsonl"
+    text = ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i > 200:
+                    break
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "user":
+                    continue
+                found = _extract_text(entry.get("message", {}).get("content"))
+                if not found:
+                    continue
+                title = _candidate_title(found)
+                if title:
+                    text = title.splitlines()[0].strip()
+                    break
+    except OSError:
+        pass
+
+    _first_message_cache[session_id] = text
+    return text or None
+
+
+def display_name(session: dict) -> str:
+    """A human-friendly title for the row, falling back to the session's
+    original task description when it's still just an auto-generated id."""
+    name = (session.get("name") or "").strip()
+    job_id = session.get("jobId") or ""
+    is_placeholder = not name or (job_id and name == job_id)
+
+    if is_placeholder:
+        cwd = session.get("cwd")
+        session_id = session.get("sessionId")
+        if cwd and session_id:
+            first_msg = _first_user_message(cwd, session_id)
+            if first_msg:
+                name = first_msg
+
+    return name or session.get("_id", "")[:10]
+
+
 def _proc_alive(pid: int) -> bool:
     """Check that `pid` is still a running process, not a dead PID left behind
     by a session that crashed or was killed without cleaning up its file."""
@@ -140,8 +250,11 @@ def read_sessions() -> list[dict]:
         sessions.append(data)
 
     def sort_key(s):
-        status = s.get("status", "unknown").lower()
-        priority = STATUS_STYLES.get(status, DEFAULT_STYLE)[3]
+        if is_control_session(s):
+            priority = CONTROL_STYLE[3]
+        else:
+            status = s.get("status", "unknown").lower()
+            priority = STATUS_STYLES.get(status, DEFAULT_STYLE)[3]
         return (priority, -s.get("_mtime", 0))
 
     sessions.sort(key=sort_key)
@@ -233,15 +346,21 @@ class SessionRow:
 
     def update(self, session: dict):
         self.session = session
-        status = session.get("status", "unknown").lower()
-        bg, fg, label, _ = STATUS_STYLES.get(status, DEFAULT_STYLE)
+        control = is_control_session(session)
+
+        if control:
+            bg, fg, label = CONTROL_STYLE[0], CONTROL_STYLE[1], CONTROL_STYLE[2]
+            status_key = "__control__"
+        else:
+            status_key = session.get("status", "unknown").lower()
+            bg, fg, label, _ = STATUS_STYLES.get(status_key, DEFAULT_STYLE)
 
         # Only reconfigure badge colors if status changed
-        if status != self._current_status:
+        if status_key != self._current_status:
             self.badge.config(text=f" {label} ", fg=fg, bg=bg)
-            self._current_status = status
+            self._current_status = status_key
 
-        name = session.get("name", "") or session["_id"][:10]
+        name = "claude agents (idle)" if control else display_name(session)
         if len(name) > 28:
             name = name[:26] + "..."
         self.name_label.config(text=name)
@@ -334,7 +453,7 @@ class SessionMonitor:
             if prev is None:
                 continue
 
-            name = s.get("name", sid[:8])
+            name = display_name(s)
 
             if status in NOTIFY_WAITING and prev not in NOTIFY_WAITING:
                 notify("Needs Input", f"{name} is waiting for you")
@@ -349,7 +468,11 @@ class SessionMonitor:
         n = len(sessions)
         visible_count = min(n, MAX_VISIBLE)
 
-        active = sum(1 for s in sessions if s.get("status", "").lower() not in ("stopped", "completed", "done"))
+        active = sum(
+            1 for s in sessions
+            if not is_control_session(s)
+            and s.get("status", "").lower() not in ("stopped", "completed", "done")
+        )
         self.count_label.config(text=f"{active} active / {n} total")
 
         if n == 0:
