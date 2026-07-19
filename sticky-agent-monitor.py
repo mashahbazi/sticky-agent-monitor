@@ -39,19 +39,26 @@ LOG_FILE = RUN_DIR / "monitor.log"
 _DAEMON_ENV_FLAG = "_STICKY_AGENT_MONITOR_DAEMONIZED"
 
 # Status → (bg, fg, label, sort priority)
-# Claude Code uses: busy, waiting, idle  (and possibly others)
+#
+# In practice a background agent only ever reports "busy" or "idle" -- there's
+# no distinct "completed"/"done" status to tell "finished this task" apart
+# from "finished and just sitting there". So we treat "idle" as done: once a
+# bg agent stops being busy/waiting/erroring, it's done, full stop. Every
+# state below is also picked to have a clearly different hue from every other
+# state (and from CONTROL_STYLE below) so you can tell them apart by color
+# alone, not just by reading the label.
 STATUS_STYLES = {
-    "waiting":       ("#FEF3C7", "#92400E", "WAITING",     0),
-    "needs_input":   ("#FEF3C7", "#92400E", "NEEDS INPUT", 0),
-    "blocked":       ("#FEE2E2", "#991B1B", "BLOCKED",     1),
-    "error":         ("#FEE2E2", "#991B1B", "ERROR",       2),
-    "busy":          ("#DBEAFE", "#1E40AF", "BUSY",        3),
-    "running":       ("#DBEAFE", "#1E40AF", "RUNNING",     3),
-    "working":       ("#DBEAFE", "#1E40AF", "WORKING",     3),
-    "idle":          ("#E0E7FF", "#3730A3", "IDLE",        4),
-    "completed":     ("#D1FAE5", "#065F46", "DONE",        5),
-    "done":          ("#D1FAE5", "#065F46", "DONE",        5),
-    "stopped":       ("#F3F4F6", "#6B7280", "STOPPED",     6),
+    "waiting":       ("#FEF3C7", "#92400E", "WAITING",     0),  # amber
+    "needs_input":   ("#FEF3C7", "#92400E", "NEEDS INPUT", 0),  # amber
+    "blocked":       ("#FECACA", "#7F1D1D", "BLOCKED",     1),  # red
+    "error":         ("#FECACA", "#7F1D1D", "ERROR",       2),  # red
+    "busy":          ("#BFDBFE", "#1E3A8A", "BUSY",        3),  # blue
+    "running":       ("#BFDBFE", "#1E3A8A", "RUNNING",     3),  # blue
+    "working":       ("#BFDBFE", "#1E3A8A", "WORKING",     3),  # blue
+    "idle":          ("#A7F3D0", "#065F46", "DONE",        5),  # green
+    "completed":     ("#A7F3D0", "#065F46", "DONE",        5),  # green
+    "done":          ("#A7F3D0", "#065F46", "DONE",        5),  # green
+    "stopped":       ("#E5E7EB", "#374151", "STOPPED",     6),  # gray
 }
 DEFAULT_STYLE = ("#F3F4F6", "#374151", "UNKNOWN", 99)
 
@@ -61,12 +68,16 @@ DEFAULT_STYLE = ("#F3F4F6", "#374151", "UNKNOWN", 99)
 # in ~/.claude/sessions/*.json exactly like any other session, but it never
 # received a real task -- it's still idle and still named after its own
 # auto-generated id. We tag those distinctly so they don't get confused with
-# actual working agents. (bg, fg, label, sort priority)
-CONTROL_STYLE = ("#EDE9FE", "#5B21B6", "CONTROL", 50)
+# actual working agents. Pink is used deliberately: it's the one hue nothing
+# else in STATUS_STYLES uses, so it can't be mistaken for busy/done/etc.
+# (bg, fg, label, sort priority)
+CONTROL_STYLE = ("#FBCFE8", "#9D174D", "CONTROL", 50)
 
-# Statuses that trigger notifications when transitioned INTO
+# Statuses that trigger notifications when transitioned INTO. "idle" counts
+# as done (see STATUS_STYLES above) -- that's the only completion signal most
+# background agents ever actually report.
 NOTIFY_WAITING = {"waiting", "needs_input"}
-NOTIFY_DONE = {"completed", "done"}
+NOTIFY_DONE = {"completed", "done", "idle"}
 NOTIFY_ERROR = {"error", "blocked"}
 
 
@@ -450,7 +461,7 @@ class SessionMonitor:
             current[sid] = status
 
             prev = self.prev_states.get(sid)
-            if prev is None:
+            if prev is None or is_control_session(s):
                 continue
 
             name = display_name(s)

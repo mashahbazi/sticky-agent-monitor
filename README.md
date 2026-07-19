@@ -11,14 +11,22 @@ glance which sessions are **busy**, **waiting for input**, **done**, or in an
 ## Features
 
 - **Live session list** — reads `~/.claude/sessions/*.json` and updates in place.
-- **Color-coded status badges** — waiting, blocked, error, busy, idle, done, stopped.
+- **Color-coded status badges, one clearly distinct hue per state** — amber
+  for waiting/needs input, red for blocked/error, blue for busy, green for
+  done, gray for stopped, pink for the `claude agents` control view (see
+  below) — chosen so you can tell them apart by color alone, not just by
+  reading the label.
+- **No separate "idle" state** — a background agent only ever reports "busy"
+  or "idle"; there's no distinct "just finished" signal. So "idle" is treated
+  as **DONE** (same green badge), instead of a confusingly similar third
+  status sitting between busy and done.
 - **Readable titles** — if a session hasn't been given a friendly name yet, the
   monitor recovers its original task description from the session transcript
   instead of showing a bare hash like `125f85a7`.
 - **`claude agents` control view flagged separately** — launching `claude
   agents` leaves an idle standby worker registered in
   `~/.claude/sessions/*.json`, indistinguishable at a glance from a real
-  working agent. The monitor detects it and tags it with a distinct purple
+  working agent. The monitor detects it and tags it with a distinct pink
   **CONTROL** badge instead of counting it as an active agent.
 - **Smart sorting** — sessions needing your attention float to the top;
   control-view entries sink near the bottom.
