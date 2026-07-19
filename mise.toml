@@ -1,0 +1,14 @@
+[tools]
+python = "3.12"
+
+[env]
+# Create/activate a project-local virtualenv managed by mise.
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.install]
+description = "Install Python dependencies into the venv"
+run = "pip install -r requirements.txt"
+
+[tasks.start]
+description = "Run the sticky agent monitor overlay"
+run = "python sticky-agent-monitor.py"
