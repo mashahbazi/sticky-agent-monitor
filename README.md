@@ -13,6 +13,9 @@ glance which sessions are **busy**, **waiting for input**, **done**, or in an
 - **Live session list** — reads `~/.claude/sessions/*.json` and updates in place.
 - **Color-coded status badges** — waiting, blocked, error, busy, idle, done, stopped.
 - **Smart sorting** — sessions needing your attention float to the top.
+- **Click to attach** (macOS) — click any session row to open a new Terminal.app
+  window pre-filtered to that session's background agent (`claude agents --cwd
+  <dir>`); press Enter once to attach.
 - **Native notifications** — alerts when a session starts waiting, finishes, or errors
   (macOS via `osascript`, Linux via `notify-send`).
 - **Zero dependencies** — pure Python standard library (uses `tkinter`).
@@ -116,7 +119,15 @@ Tweak the constants near the top of `sticky-agent-monitor.py`:
 ## How it works
 
 Each session JSON file is expected to contain fields such as `status`, `name`,
-`cwd`, and `updatedAt`. The monitor maps each `status` to a colored badge and
-sort priority, then updates the existing row widgets in place on every poll to
-avoid flicker. State transitions (e.g. `busy → waiting`) trigger native OS
-notifications.
+`cwd`, `sessionId`, and `updatedAt`. The monitor maps each `status` to a
+colored badge and sort priority, then updates the existing row widgets in
+place on every poll to avoid flicker. State transitions (e.g.
+`busy → waiting`) trigger native OS notifications.
+
+Clicking a row runs an AppleScript that opens Terminal.app and runs
+`claude agents --cwd <cwd>`, which lists only the background agent(s) running
+under that directory (usually just the one you clicked). Press Enter (or →)
+on the highlighted session to attach to its live conversation. `claude
+--resume` isn't used here because it refuses to attach to a session that's
+still running as a background agent. This is macOS-only (uses `osascript` /
+Terminal.app).

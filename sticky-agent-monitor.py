@@ -16,6 +16,7 @@ Requires: Python 3.10+ (tkinter is included with Python on macOS/Windows)
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -69,6 +70,36 @@ def notify(title: str, message: str):
             ])
         elif sys.platform == "linux":
             subprocess.Popen(["notify-send", title, message])
+    except Exception:
+        pass
+
+
+def _applescript_escape(s: str) -> str:
+    """Escape a string for safe embedding inside an AppleScript "..." literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def attach_session(session: dict):
+    """Open a new Terminal.app window/tab pre-filtered to this session's
+    background agent view, ready to attach with a single Enter keypress.
+
+    `claude --resume` refuses to attach to a session that's still running as
+    a background agent (it says to use `claude agents` instead), so we open
+    `claude agents --cwd <dir>` scoped to this session's directory. macOS only.
+    """
+    if sys.platform != "darwin":
+        return
+
+    cwd = session.get("cwd") or str(Path.home())
+    shell_cmd = f"cd {shlex.quote(cwd)} && claude agents --cwd {shlex.quote(cwd)}"
+    script = (
+        'tell application "Terminal"\n'
+        "activate\n"
+        f'do script "{_applescript_escape(shell_cmd)}"\n'
+        "end tell"
+    )
+    try:
+        subprocess.Popen(["osascript", "-e", script])
     except Exception:
         pass
 
@@ -131,41 +162,77 @@ def format_ago(session: dict) -> str:
         return f"{int(delta / 3600)}h"
 
 
+ROW_BG = "#1F2937"
+ROW_BG_HOVER = "#2D3748"
+
+
 class SessionRow:
     """A single session row that updates its labels in-place."""
 
-    def __init__(self, parent: tk.Frame):
-        self.frame = tk.Frame(parent, bg="#1F2937", highlightthickness=0)
+    def __init__(self, parent: tk.Frame, on_click=None):
+        self.on_click = on_click
+        self.session: dict | None = None
+
+        cursor = "pointinghand" if sys.platform == "darwin" else "hand2"
+
+        self.frame = tk.Frame(parent, bg=ROW_BG, highlightthickness=0, cursor=cursor)
 
         self.badge = tk.Label(
-            self.frame, text="", font=("SF Mono", 9, "bold"), padx=4, pady=1
+            self.frame, text="", font=("SF Mono", 9, "bold"), padx=4, pady=1, cursor=cursor
         )
         self.badge.pack(side="left", padx=(6, 8), pady=8)
+        self.badge.bind("<Button-1>", self._handle_click)
 
-        info = tk.Frame(self.frame, bg="#1F2937")
-        info.pack(side="left", fill="x", expand=True, pady=4)
+        self.info = tk.Frame(self.frame, bg=ROW_BG, cursor=cursor)
+        self.info.pack(side="left", fill="x", expand=True, pady=4)
 
         self.name_label = tk.Label(
-            info, text="", font=("SF Pro Text", 11, "bold"),
-            fg="#E5E7EB", bg="#1F2937", anchor="w"
+            self.info, text="", font=("SF Pro Text", 11, "bold"),
+            fg="#E5E7EB", bg=ROW_BG, anchor="w", cursor=cursor
         )
         self.name_label.pack(anchor="w")
 
         self.cwd_label = tk.Label(
-            info, text="", font=("SF Pro Text", 9),
-            fg="#6B7280", bg="#1F2937", anchor="w"
+            self.info, text="", font=("SF Pro Text", 9),
+            fg="#6B7280", bg=ROW_BG, anchor="w", cursor=cursor
         )
         self.cwd_label.pack(anchor="w")
 
         self.time_label = tk.Label(
             self.frame, text="", font=("SF Mono", 9),
-            fg="#6B7280", bg="#1F2937", padx=8
+            fg="#6B7280", bg=ROW_BG, padx=8, cursor=cursor
         )
         self.time_label.pack(side="right", pady=8)
 
+        self._clickable_widgets = (
+            self.frame, self.info, self.name_label, self.cwd_label, self.time_label
+        )
+        for widget in self._clickable_widgets:
+            widget.bind("<Button-1>", self._handle_click)
+            widget.bind("<Enter>", self._on_enter)
+            widget.bind("<Leave>", self._on_leave)
+
         self._current_status = None
 
+    def _handle_click(self, _event):
+        if self.session and self.on_click:
+            self.on_click(self.session)
+
+    def _on_enter(self, _event):
+        self._set_row_bg(ROW_BG_HOVER)
+
+    def _on_leave(self, _event):
+        self._set_row_bg(ROW_BG)
+
+    def _set_row_bg(self, color: str):
+        self.frame.config(bg=color)
+        self.info.config(bg=color)
+        self.name_label.config(bg=color)
+        self.cwd_label.config(bg=color)
+        self.time_label.config(bg=color)
+
     def update(self, session: dict):
+        self.session = session
         status = session.get("status", "unknown").lower()
         bg, fg, label, _ = STATUS_STYLES.get(status, DEFAULT_STYLE)
 
@@ -240,7 +307,7 @@ class SessionMonitor:
         # Pre-allocate row widgets (reuse them, never destroy/recreate)
         self.rows: list[SessionRow] = []
         for _ in range(MAX_VISIBLE):
-            self.rows.append(SessionRow(self.list_frame))
+            self.rows.append(SessionRow(self.list_frame, on_click=attach_session))
 
         self.overflow_label = tk.Label(
             self.list_frame, text="", font=("SF Pro Text", 10),
