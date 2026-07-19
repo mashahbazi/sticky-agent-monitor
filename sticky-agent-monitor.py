@@ -5,12 +5,18 @@ Claude Code Session Monitor
 A tiny always-on-top overlay that shows all active Claude Code sessions and their state.
 Polls ~/.claude/sessions/*.json every 3 seconds. Updates labels in-place (no flicker).
 
-Usage:  python3 claude_session_monitor.py
+Usage:
+    python3 sticky-agent-monitor.py            # start detached in the background
+    python3 sticky-agent-monitor.py --foreground  # run attached to this terminal
+    python3 sticky-agent-monitor.py --stop     # stop the running background instance
+    python3 sticky-agent-monitor.py --status   # check whether it's running
+
 Requires: Python 3.10+ (tkinter is included with Python on macOS/Windows)
 """
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -24,6 +30,11 @@ WINDOW_WIDTH = 360
 ROW_HEIGHT = 54
 HEADER_HEIGHT = 32
 MAX_VISIBLE = 10
+
+RUN_DIR = Path.home() / ".sticky-agent-monitor"
+PID_FILE = RUN_DIR / "monitor.pid"
+LOG_FILE = RUN_DIR / "monitor.log"
+_DAEMON_ENV_FLAG = "_STICKY_AGENT_MONITOR_DAEMONIZED"
 
 # Status → (bg, fg, label, sort priority)
 # Claude Code uses: busy, waiting, idle  (and possibly others)
@@ -311,6 +322,93 @@ class SessionMonitor:
         self.root.mainloop()
 
 
+def _read_pid() -> int | None:
+    try:
+        return int(PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists but owned by someone else -- treat as alive
+    return True
+
+
+def cmd_status():
+    pid = _read_pid()
+    if pid and _pid_running(pid):
+        print(f"running (pid {pid})")
+    else:
+        print("not running")
+
+
+def cmd_stop():
+    pid = _read_pid()
+    if not pid or not _pid_running(pid):
+        print("not running")
+        PID_FILE.unlink(missing_ok=True)
+        return
+    os.kill(pid, signal.SIGTERM)
+    print(f"stopped (pid {pid})")
+    PID_FILE.unlink(missing_ok=True)
+
+
+def launch_detached():
+    """Relaunch this script as a background process detached from the
+    controlling terminal (new session, no inherited stdio) so it keeps
+    running after the terminal window is closed, then exit this process."""
+    existing = _read_pid()
+    if existing and _pid_running(existing):
+        print(f"already running (pid {existing})")
+        sys.exit(0)
+
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env[_DAEMON_ENV_FLAG] = "1"
+
+    with open(LOG_FILE, "ab") as log:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__)],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            env=env,
+            start_new_session=True,  # setsid: detach from this terminal's session
+        )
+
+    PID_FILE.write_text(str(proc.pid))
+    print(f"sticky-agent-monitor started in background (pid {proc.pid})")
+    print(f"logs: {LOG_FILE}")
+    print(f"stop with: python3 {os.path.basename(__file__)} --stop")
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    if "--stop" in sys.argv:
+        cmd_stop()
+        sys.exit(0)
+    if "--status" in sys.argv:
+        cmd_status()
+        sys.exit(0)
+
+    foreground = "--foreground" in sys.argv or os.environ.get(_DAEMON_ENV_FLAG) == "1"
+    if not foreground:
+        launch_detached()
+
+    # Detached child (or explicit --foreground run) continues here.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if os.environ.get(_DAEMON_ENV_FLAG) == "1":
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()))
+
     app = SessionMonitor()
-    app.run()
+    try:
+        app.run()
+    finally:
+        if _read_pid() == os.getpid():
+            PID_FILE.unlink(missing_ok=True)

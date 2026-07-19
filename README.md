@@ -64,9 +64,43 @@ python sticky-agent-monitor.py
 python sticky-agent-monitor.py
 ```
 
+By default this starts the overlay **detached from the terminal** — it forks
+a background process (new session, no inherited stdin/stdout) and immediately
+returns control of your shell. The overlay keeps running even after you close
+the terminal window; closing it again just closes that terminal, not the app.
+
 The window appears in the top-right corner and stays on top of other windows.
 It resizes automatically to fit the number of active sessions (up to 10 visible,
 with a `+N more…` overflow indicator).
+
+### Managing the background process
+
+```bash
+python sticky-agent-monitor.py --status   # is it running?
+python sticky-agent-monitor.py --stop     # stop it
+```
+
+To run it attached to the current terminal instead (e.g. for debugging, so
+`print`/errors show up directly and Ctrl-C stops it):
+
+```bash
+python sticky-agent-monitor.py --foreground
+```
+
+A pidfile is kept at `~/.sticky-agent-monitor/monitor.pid` and logs at
+`~/.sticky-agent-monitor/monitor.log`.
+
+With `mise`:
+
+```bash
+mise run start       # start in background
+mise run status      # check status
+mise run stop        # stop it
+mise run foreground  # run attached, for debugging
+```
+
+To actually quit the app, use `--stop` (or click the window's close button /
+Cmd-Q it, same as any Mac app).
 
 ## Configuration
 

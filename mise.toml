@@ -10,5 +10,17 @@ description = "Install Python dependencies into the venv"
 run = "pip install -r requirements.txt"
 
 [tasks.start]
-description = "Run the sticky agent monitor overlay"
+description = "Run the sticky agent monitor overlay in the background (survives closing the terminal)"
 run = "python sticky-agent-monitor.py"
+
+[tasks.foreground]
+description = "Run the overlay attached to this terminal (for debugging)"
+run = "python sticky-agent-monitor.py --foreground"
+
+[tasks.stop]
+description = "Stop the background overlay"
+run = "python sticky-agent-monitor.py --stop"
+
+[tasks.status]
+description = "Check whether the overlay is running"
+run = "python sticky-agent-monitor.py --status"
