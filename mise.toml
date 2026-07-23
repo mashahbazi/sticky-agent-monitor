@@ -1,26 +1,23 @@
-[tools]
-python = "3.12"
-
-[env]
-# Create/activate a project-local virtualenv managed by mise.
-_.python.venv = { path = ".venv", create = true }
-
-[tasks.install]
-description = "Install Python dependencies into the venv"
-run = "pip install -r requirements.txt"
+[tasks.build]
+description = "Compile the menubar app"
+run = "swiftc -O -swift-version 5 -o sticky-agent-monitor main.swift pet.swift"
+sources = ["main.swift", "pet.swift"]
+outputs = ["sticky-agent-monitor"]
 
 [tasks.start]
-description = "Run the sticky agent monitor overlay in the background (survives closing the terminal)"
-run = "python sticky-agent-monitor.py"
+description = "Build and start the menubar app in the background (survives closing the terminal)"
+depends = ["build"]
+run = "./sticky-agent-monitor"
 
 [tasks.foreground]
-description = "Run the overlay attached to this terminal (for debugging)"
-run = "python sticky-agent-monitor.py --foreground"
+description = "Run attached to this terminal (for debugging)"
+depends = ["build"]
+run = "./sticky-agent-monitor --foreground"
 
 [tasks.stop]
-description = "Stop the background overlay"
-run = "python sticky-agent-monitor.py --stop"
+description = "Stop the background menubar app"
+run = "./sticky-agent-monitor --stop"
 
 [tasks.status]
-description = "Check whether the overlay is running"
-run = "python sticky-agent-monitor.py --status"
+description = "Check whether the menubar app is running"
+run = "./sticky-agent-monitor --status"

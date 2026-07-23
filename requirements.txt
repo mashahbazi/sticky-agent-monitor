@@ -1,9 +1,0 @@
-# sticky-agent-monitor has no third-party dependencies.
-# It runs entirely on the Python standard library (json, subprocess, tkinter, ...).
-#
-# tkinter is bundled with the official python.org / mise Python builds on
-# macOS and Windows. On some Linux distros it ships separately:
-#   Debian/Ubuntu:  sudo apt install python3-tk
-#   Fedora:         sudo dnf install python3-tkinter
-#
-# Add runtime dependencies below as the project grows.
