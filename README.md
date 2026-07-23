@@ -38,9 +38,14 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   composed in code, no assets) that embodies the fleet. A pixel icon strip
   beside it mirrors the menubar counts (a standing tally of every session, in
   every state); when an agent is blocked it waves and shows a cartoony speech
-  bubble listing the sessions that want you, each with its own icon — bell for
-  blocked, balloon for asking, check for just finished, hourglass for still
-  running (pixel frame, monospaced text). The bubble carries two row lifetimes:
+  bubble listing the sessions that want you (pixel frame, monospaced text), each
+  row an icon plus the name plus a right-aligned age. The icon mirrors the
+  menubar glyph for its state — `💬` asked, `✅` just finished, `⏳` still
+  running, `❌` errored — except for a blocked agent, which goes further and
+  names its gate: `🔒` permission, `📦` sandbox, `⚙️` worker, `🗨️` dialog, `❓`
+  needs an answer. That distinction is the difference between "go approve
+  something" and "go answer something", which is the whole reason a blocked row
+  is worth interrupting for. The bubble carries two row lifetimes:
   **blocked**, errored and **busy** rows hold until the agent moves on, while an
   agent that goes **asked** or **done** gets a row that appears on the
   transition and retires itself 5 seconds later, like a notification — there is
@@ -49,8 +54,9 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   bottom, under everything that wants something from you, and self-retiring rows
   show no age (a number ticking toward its own disappearance says nothing).
   Beyond `maxBubbleRows` the tail folds into a "+N more" line, so the busy rows
-  are what gets hidden first. Click a bubble line to attach, right-click the bubble to
-  snooze, click the octopus for the session menu, drag to move it. It sleeps
+  are what gets hidden first. Click a bubble line to attach, tap the octopus to
+  hide or show the bubble, drag the octopus to move it; its position survives
+  restarts and the window is click-through everywhere else. It sleeps
   when all is quiet, panics on errors, feeds on completed tasks (XP persisted
   in config) and earns a bandana at 25 completions and a top hat at 100.
   Disable via Settings ("Show desktop pet") or `"pet": false` in the config.
@@ -89,8 +95,11 @@ attach to a session, in a new iTerm tab, without touching the mouse.
 - **No separate "idle" state**: a background agent only ever reports "busy" or
   "idle"; there's no distinct "just finished" signal. So "idle" is treated as
   **done** instead of a confusing third state.
-- **Zero dependencies**: one Swift file, compiled with the system toolchain.
-  No Electron, no Python, no packages.
+- **Start at login**: a Settings checkbox installs/removes a LaunchAgent. A
+  single-instance guard keeps a login-started and a manually started copy
+  from running side by side.
+- **Zero dependencies**: two Swift files, compiled with the system
+  toolchain. No Electron, no Python, no packages.
 
 ## Requirements
 

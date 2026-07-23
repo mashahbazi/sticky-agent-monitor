@@ -231,7 +231,8 @@ let claudePath: String? = {
 // sessionId -> state ("working" / "done" / "blocked" / "failed") from the
 // claude CLI. Note the CLI derives "blocked" from the agent's closing prose,
 // so it covers both a real gate and a mere trailing question; `Session.status`
-// uses the session file's `waitingFor` to separate the two.
+// uses the session file's `waitingFor` to separate the two. The CLI output
+// carries no `waitingFor` of its own — only the session file does.
 func fetchAgentStates() -> [String: String] {
     guard let claude = claudePath else { return [:] }
     let out = runCapture([claude, "agents", "--json"])
@@ -245,6 +246,23 @@ func fetchAgentStates() -> [String: String] {
         }
     }
     return map
+}
+
+var seenWaitingFor: Set<String> = []
+
+// Compress the session file's `waitingFor` gate name to a one-word tag, for UI
+// too tight for `blockerReason`'s prose (the pet's bubble rows, which turn the
+// tag into an icon). Matching is on substrings so the known gate names
+// ("permission prompt", "input needed", "dialog open", "worker request",
+// "sandbox request") and any future rewording both land on the right tag.
+func shortWaitingFor(_ raw: String?) -> String? {
+    guard let lower = raw?.lowercased(), !lower.isEmpty else { return nil }
+    if lower.contains("permission") { return "permission" }
+    if lower.contains("sandbox") { return "sandbox" }
+    if lower.contains("worker") { return "worker" }
+    if lower.contains("input") || lower.contains("question") { return "question" }
+    if lower.contains("dialog") { return "dialog" }
+    return lower.split(separator: " ").first.map(String.init)
 }
 
 // Session files merged with CLI states, sorted attention-first. Spawns the
@@ -265,6 +283,12 @@ func loadSessions() -> [Session] {
         for i in sessions.indices {
             if let sid = sessions[i].sessionId {
                 sessions[i].state = states[sid]
+            }
+            // Surface gate names we haven't mapped yet, so gaps in
+            // shortWaitingFor show up in the log instead of as a bare bell.
+            if let wf = sessions[i].waitingFor, !seenWaitingFor.contains(wf) {
+                seenWaitingFor.insert(wf)
+                NSLog("waitingFor observed: '%@' -> tag '%@'", wf, shortWaitingFor(wf) ?? "-")
             }
         }
     }
@@ -910,6 +934,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var recorderButton: HotKeyRecorderButton?
     var popoutCheckbox: NSButton?
     var petCheckbox: NSButton?
+    var loginCheckbox: NSButton?
     var pet: PetController?
     var petEnabled = true
     var petSpeciesID = "octopus"
@@ -924,18 +949,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         attentionPanel.onAttach = { attachSession($0) }
         attentionPanel.onDismiss = { [weak self] in self?.snoozeCurrent() }
 
-        petSpeciesID = (readConfig()["petSpecies"] as? String) ?? "octopus"
-        let petCtl = PetController(initialXP: (readConfig()["petXP"] as? Int) ?? 0,
-                                   initialSpecies: petSpeciesID)
+        let startupConfig = readConfig()
+        petSpeciesID = (startupConfig["petSpecies"] as? String) ?? "octopus"
+        var savedOrigin: NSPoint?
+        if let x = startupConfig["petX"] as? Double, let y = startupConfig["petY"] as? Double {
+            savedOrigin = NSPoint(x: x, y: y)
+        }
+        let petCtl = PetController(initialXP: (startupConfig["petXP"] as? Int) ?? 0,
+                                   initialSpecies: petSpeciesID,
+                                   savedOrigin: savedOrigin)
         petCtl.onAttach = { [weak self] fileID in
             guard let self = self,
                   let s = self.lastSessions.first(where: { $0.fileID == fileID }) else { return }
             attachSession(s)
         }
-        petCtl.onOpenMenu = { [weak self] in self?.openMenu() }
-        petCtl.onDismissBubble = { [weak self] in self?.snoozeCurrent() }
         petCtl.onXPChanged = { xp in
             writeConfig(["petXP": xp])
+        }
+        petCtl.onMoved = { [weak self] origin in
+            writeConfig(["petX": Double(origin.x), "petY": Double(origin.y)])
+            self?.lastConfigMtime = configModTime()  // our own write, already applied
         }
         pet = petCtl
         timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
@@ -1088,19 +1121,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             default: kind = .blocked
             }
             // A self-retiring row shows no age: a number counting up to the
-            // moment the row vanishes tells you nothing. The extra width goes
-            // back to the name instead.
-            var name = displayName(s)
-            let transient = isTransientRow(cat)
-            let room = transient ? 26 : 20
-            if name.count > room { name = String(name.prefix(room)) }
+            // moment the row vanishes tells you nothing. The age has its own
+            // right-aligned column here, so leaving it out just blanks that
+            // column and the name keeps its full width either way.
             return PetBubbleRow(id: s.fileID, kind: kind,
-                                text: transient ? name : "\(name) \(formatAgo(s))")
+                                text: String(displayName(s).prefix(26)),
+                                ago: isTransientRow(cat) ? "" : formatAgo(s),
+                                why: shortWaitingFor(s.waitingFor))
         } : []
         if rows.count > maxBubbleRows {
             let folded = rows.count - (maxBubbleRows - 1)
             rows = Array(rows.prefix(maxBubbleRows - 1))
-            rows.append(PetBubbleRow(id: "", kind: .more, text: "+\(folded) more"))
+            rows.append(PetBubbleRow(id: "", kind: .more, text: "+\(folded) more",
+                                     ago: "", why: nil))
         }
         pet?.update(counts: counts, rows: rows)
     }
@@ -1228,6 +1261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let idx = allPetSpecies.firstIndex(where: { $0.id == petSpeciesID }) {
             petPopup?.selectItem(at: idx)
         }
+        loginCheckbox?.state = loginItemEnabled() ? .on : .off
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
@@ -1259,6 +1293,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                 target: self, action: #selector(popoutToggled(_:)))
         let petBox = NSButton(checkboxWithTitle: "Show desktop pet",
                               target: self, action: #selector(petToggled(_:)))
+        let loginBox = NSButton(checkboxWithTitle: "Start at login",
+                                target: self, action: #selector(loginToggled(_:)))
 
         let petLabel = NSTextField(labelWithString: "Pet:")
         let petPop = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -1282,14 +1318,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
 
-        let stack = NSStackView(views: [hotkeyRow, checkbox, petBox, petRow, hint])
+        let stack = NSStackView(views: [hotkeyRow, checkbox, petBox, petRow, loginBox, hint])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 220),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 245),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "sticky-agent-monitor"
         win.isReleasedWhenClosed = false
@@ -1301,6 +1337,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         popoutCheckbox = checkbox
         petCheckbox = petBox
         petPopup = petPop
+        loginCheckbox = loginBox
+    }
+
+    @objc func loginToggled(_ sender: NSButton) {
+        setLoginItem(sender.state == .on)
     }
 
     @objc func petToggled(_ sender: NSButton) {
@@ -1444,6 +1485,38 @@ func cmdAttach(_ idArg: String) {
     attachSession(s, wait: true)
 }
 
+// MARK: - Login item
+
+let launchAgentFile = home.appendingPathComponent(
+    "Library/LaunchAgents/com.sticky-agent-monitor.plist")
+
+func loginItemEnabled() -> Bool {
+    FileManager.default.fileExists(atPath: launchAgentFile.path)
+}
+
+// A LaunchAgent starts the monitor at login. It runs the binary directly
+// (launchd is the supervisor, so no self-daemonizing detour) and reuses the
+// normal log file. Removing the plist disables it again.
+func setLoginItem(_ on: Bool) {
+    if on {
+        let plist: [String: Any] = [
+            "Label": "com.sticky-agent-monitor",
+            "ProgramArguments": [executablePath, "--foreground"],
+            "RunAtLoad": true,
+            "StandardOutPath": logFile.path,
+            "StandardErrorPath": logFile.path,
+        ]
+        try? FileManager.default.createDirectory(
+            at: launchAgentFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? PropertyListSerialization.data(
+            fromPropertyList: plist, format: .xml, options: 0) {
+            try? data.write(to: launchAgentFile)
+        }
+    } else {
+        try? FileManager.default.removeItem(at: launchAgentFile)
+    }
+}
+
 // Validate a hotkey spec, persist it to config.json. The running instance
 // notices the config change on its next poll and re-registers, no restart.
 func cmdHotkey(_ spec: String) {
@@ -1527,9 +1600,16 @@ if !args.contains("--foreground") && !isDaemonChild {
 signal(SIGHUP, SIG_IGN)
 if isDaemonChild {
     setsid()  // detach from the parent terminal's session
-    try? FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
-    try? String(getpid()).write(to: pidFile, atomically: true, encoding: .utf8)
 }
+
+// Single-instance guard: a login-item copy and a manually started copy must
+// not run side by side (duplicate menubar items, pets, notifications).
+if let existing = readPidFile(), existing != getpid(), procAlive(existing) {
+    print("already running (pid \(existing)); exiting")
+    exit(0)
+}
+try? FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+try? String(getpid()).write(to: pidFile, atomically: true, encoding: .utf8)
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
