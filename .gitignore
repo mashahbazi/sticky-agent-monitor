@@ -1,2 +1,36 @@
+# Compiled binary (built via `mise run build`)
 /sticky-agent-monitor
+*.o
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+
+# Swift Package Manager / Xcode
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+.swiftpm/
+
+# Python (legacy tooling)
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# mise
+.mise.local.toml
+
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
