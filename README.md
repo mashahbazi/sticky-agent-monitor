@@ -30,8 +30,10 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   composed in code, no assets) that embodies the fleet. A pixel icon strip
   beside it mirrors the menubar counts; when an agent needs you it waves and
   shows a cartoony speech bubble listing the waiting sessions (pixel frame,
-  monospaced text). Click a bubble line to attach, right-click the bubble to
-  snooze, click the octopus for the session menu, drag to move it. It sleeps
+  monospaced text), including what each one is blocked on (permission,
+  question, sandbox, ...). Click a bubble line to attach, right-click the
+  bubble to snooze, click the octopus for the session menu, drag to move it;
+  its position survives restarts. It sleeps
   when all is quiet, panics on errors, feeds on completed tasks (XP persisted
   in config) and earns a bandana at 25 completions and a top hat at 100.
   Disable via Settings ("Show desktop pet") or `"pet": false` in the config.
@@ -67,8 +69,11 @@ attach to a session, in a new iTerm tab, without touching the mouse.
 - **No separate "idle" state**: a background agent only ever reports "busy" or
   "idle"; there's no distinct "just finished" signal. So "idle" is treated as
   **done** instead of a confusing third state.
-- **Zero dependencies**: one Swift file, compiled with the system toolchain.
-  No Electron, no Python, no packages.
+- **Start at login**: a Settings checkbox installs/removes a LaunchAgent. A
+  single-instance guard keeps a login-started and a manually started copy
+  from running side by side.
+- **Zero dependencies**: two Swift files, compiled with the system
+  toolchain. No Electron, no Python, no packages.
 
 ## Requirements
 
