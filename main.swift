@@ -315,7 +315,15 @@ func runOsascript(_ script: String, wait: Bool = false) {
     p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     p.arguments = ["-e", script]
     p.standardOutput = FileHandle.nullDevice
-    p.standardError = FileHandle.nullDevice
+    let errPipe = Pipe()
+    p.standardError = errPipe
+    p.terminationHandler = { _ in
+        let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+        if !data.isEmpty, let msg = String(data: data, encoding: .utf8),
+           !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            NSLog("osascript error: %@", msg.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
     guard (try? p.run()) != nil else { return }
     if wait { p.waitUntilExit() }
 }
@@ -359,7 +367,7 @@ func openInTerminal(_ shellCmd: String, focusTTY: String? = nil, wait: Bool = fa
                 repeat with w in windows
                     repeat with t in tabs of w
                         repeat with s in sessions of t
-                            if tty of s is "\(tty)" then
+                            if tty of s is "\(applescriptEscape(tty))" then
                                 select w
                                 tell w to select t
                                 tell t to select s
@@ -377,25 +385,44 @@ func openInTerminal(_ shellCmd: String, focusTTY: String? = nil, wait: Bool = fa
         focusAndFallback = "        if true then"
     }
 
+    // Targeting iTerm by bundle id launches it when it isn't running (the
+    // display name "iTerm2" only resolves while the app is already open,
+    // since the app file is iTerm.app). On a cold launch, wait for iTerm's
+    // own startup window and write into its fresh shell instead of racing
+    // it with a second window. The try block falls back to Terminal.app
+    // only when iTerm isn't installed.
     let script = """
-    if application "iTerm2" is running then
-        tell application "iTerm2"
+    try
+        set wasRunning to running of application id "com.googlecode.iterm2"
+        tell application id "com.googlecode.iterm2"
+            activate
+            if wasRunning then
     \(focusAndFallback)
+                    if (count of windows) is 0 then
+                        create window with default profile
+                    else
+                        tell current window to create tab with default profile
+                    end if
+                    tell current session of current window to write text "\(escaped)"
+                end if
+            else
+                set tries to 0
+                repeat while (count of windows) is 0 and tries < 30
+                    delay 0.1
+                    set tries to tries + 1
+                end repeat
                 if (count of windows) is 0 then
                     create window with default profile
-                else
-                    tell current window to create tab with default profile
                 end if
                 tell current session of current window to write text "\(escaped)"
             end if
-            activate
         end tell
-    else
+    on error
         tell application "Terminal"
             activate
             do script "\(escaped)"
         end tell
-    end if
+    end try
     """
     runOsascript(script, wait: wait)
 }
@@ -779,6 +806,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var settingsWindow: NSWindow?
     var recorderButton: HotKeyRecorderButton?
     var popoutCheckbox: NSButton?
+    var petCheckbox: NSButton?
+    var pet: PetController?
+    var petEnabled = true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -788,6 +818,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installHotKeyHandler()
         attentionPanel.onAttach = { attachSession($0) }
         attentionPanel.onDismiss = { [weak self] in self?.snoozeCurrent() }
+
+        let petCtl = PetController(initialXP: (readConfig()["petXP"] as? Int) ?? 0)
+        petCtl.onAttach = { [weak self] fileID in
+            guard let self = self,
+                  let s = self.lastSessions.first(where: { $0.fileID == fileID }) else { return }
+            attachSession(s)
+        }
+        petCtl.onOpenMenu = { [weak self] in self?.openMenu() }
+        petCtl.onDismissBubble = { [weak self] in self?.snoozeCurrent() }
+        petCtl.onXPChanged = { xp in
+            writeConfig(["petXP": xp])
+        }
+        pet = petCtl
         timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
             self?.poll()
         }
@@ -816,6 +859,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.statusItem.button?.title = menubarTitle(sessions)
                 self.checkNotifications(sessions)
                 self.updateAttentionPanel(sessions)
+                self.updatePet(sessions)
             }
         }
     }
@@ -826,6 +870,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastConfigMtime = mtime
         let config = readConfig()
         popoutEnabled = (config["popout"] as? Bool) ?? true
+        petEnabled = (config["pet"] as? Bool) ?? true
+        pet?.setEnabled(petEnabled)
         applyHotKey((config["hotkey"] as? String) ?? defaultHotKeySpec)
     }
 
@@ -841,14 +887,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return needy.filter { !snoozed.contains("\($0.fileID):\($0.status)") }
     }
 
+    // The pet's speech bubble takes over the attention role when it's
+    // enabled; the floating panel remains as the pet-less fallback.
     func updateAttentionPanel(_ sessions: [Session]) {
-        attentionPanel.update(popoutEnabled ? needySessions(sessions) : [])
+        let usePanel = popoutEnabled && !petEnabled
+        attentionPanel.update(usePanel ? needySessions(sessions) : [])
     }
 
     func snoozeCurrent() {
         for s in needySessions(lastSessions) {
             snoozed.insert("\(s.fileID):\(s.status)")
         }
+    }
+
+    func updatePet(_ sessions: [Session]) {
+        guard petEnabled else { return }
+        var counts = PetStatusCounts()
+        for s in sessions {
+            switch statusMeta(s.status).cat {
+            case .waiting: counts.waiting += 1
+            case .error: counts.error += 1
+            case .busy: counts.busy += 1
+            case .done: counts.done += 1
+            default: break
+            }
+        }
+        let rows: [PetBubbleRow] = popoutEnabled ? needySessions(sessions).map { s in
+            let kind: PetAgentKind = statusMeta(s.status).cat == .error ? .error : .waiting
+            var name = displayName(s)
+            if name.count > 20 { name = String(name.prefix(20)) }
+            return PetBubbleRow(id: s.fileID, kind: kind,
+                                text: "\(name) \(formatAgo(s))")
+        } : []
+        pet?.update(counts: counts, rows: rows)
     }
 
     func checkNotifications(_ sessions: [Session]) {
@@ -868,6 +939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             } else if notifyDone.contains(status) && !notifyDone.contains(prev) {
                 notify(title: "Completed", message: "\(name) finished", attachJobId: s.shortJobId)
+                pet?.gainXP()  // the pet feeds on completed tasks
             } else if notifyError.contains(status) && !notifyError.contains(prev) {
                 if !popoutEnabled {
                     notify(title: "Attention", message: "\(name) hit an error", attachJobId: s.shortJobId)
@@ -944,6 +1016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if settingsWindow == nil { buildSettingsWindow() }
         recorderButton?.displaySpec = currentHotKey?.display ?? configuredHotKeySpec()
         popoutCheckbox?.state = popoutEnabled ? .on : .off
+        petCheckbox?.state = petEnabled ? .on : .off
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
@@ -973,6 +1046,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let checkbox = NSButton(checkboxWithTitle: "Show pop-out panel when agents need input",
                                 target: self, action: #selector(popoutToggled(_:)))
+        let petBox = NSButton(checkboxWithTitle: "Show desktop pet",
+                              target: self, action: #selector(petToggled(_:)))
 
         let hotkeyLabel = NSTextField(labelWithString: "Global hotkey:")
         let hotkeyRow = NSStackView(views: [hotkeyLabel, recorder])
@@ -984,14 +1059,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
 
-        let stack = NSStackView(views: [hotkeyRow, checkbox, hint])
+        let stack = NSStackView(views: [hotkeyRow, checkbox, petBox, hint])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 150),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 180),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "sticky-agent-monitor"
         win.isReleasedWhenClosed = false
@@ -1001,6 +1076,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsWindow = win
         recorderButton = recorder
         popoutCheckbox = checkbox
+        petCheckbox = petBox
+    }
+
+    @objc func petToggled(_ sender: NSButton) {
+        petEnabled = sender.state == .on
+        writeConfig(["pet": petEnabled])
+        lastConfigMtime = configModTime()  // our own write, already applied
+        pet?.setEnabled(petEnabled)
+        if petEnabled { updatePet(lastSessions) }
     }
 
     @objc func popoutToggled(_ sender: NSButton) {

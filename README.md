@@ -26,12 +26,21 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   The monitor overlays the `state` field from `claude agents --json`
   ("working" / "done" / "blocked"), where `blocked` means the agent is
   waiting on you. That's what triggers the bell and the pop-out.
-- **Attention pop-out**: when an agent starts waiting for input (or errors),
-  a floating panel slides in under the menubar and stays there until the
-  agent is handled, unlike a notification your brain learns to dismiss. It
-  never steals keyboard focus; clicking a row attaches, `✕` snoozes until
-  the agent's status next changes. Disable with `"popout": false` in the
-  config file.
+- **Octoclaude, the desktop pet**: a pixel-art octopus (SpriteKit, all art
+  composed in code, no assets) that embodies the fleet. A pixel icon strip
+  beside it mirrors the menubar counts; when an agent needs you it waves and
+  shows a cartoony speech bubble listing the waiting sessions (pixel frame,
+  monospaced text). Click a bubble line to attach, right-click the bubble to
+  snooze, click the octopus for the session menu, drag to move it. It sleeps
+  when all is quiet, panics on errors, feeds on completed tasks (XP persisted
+  in config) and earns a bandana at 25 completions and a top hat at 100.
+  Disable via Settings ("Show desktop pet") or `"pet": false` in the config.
+- **Attention pop-out**: with the pet disabled, a floating panel takes over
+  the speech bubble's job: it slides in under the menubar when an agent
+  starts waiting (or errors) and stays until the agent is handled, unlike a
+  notification your brain learns to dismiss. It never steals keyboard focus;
+  clicking a row attaches, `✕` snoozes until the agent's status next
+  changes. Disable with `"popout": false` in the config file.
 - **Keyboard-first attach**: menu items are numbered; plain `1`-`9` attaches
   instantly. Arrow keys + Enter work too. `a` opens the full `claude agents`
   TUI, `q` quits.

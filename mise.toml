@@ -1,7 +1,7 @@
 [tasks.build]
 description = "Compile the menubar app"
-run = "swiftc -O -swift-version 5 -o sticky-agent-monitor main.swift"
-sources = ["main.swift"]
+run = "swiftc -O -swift-version 5 -o sticky-agent-monitor main.swift pet.swift"
+sources = ["main.swift", "pet.swift"]
 outputs = ["sticky-agent-monitor"]
 
 [tasks.start]
