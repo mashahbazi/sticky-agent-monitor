@@ -26,6 +26,13 @@ private let pixelPalette: [Character: NSColor] = [
     "L": NSColor(red: 0.35, green: 0.55, blue: 0.95, alpha: 1),  // blue
     "E": NSColor(red: 0.20, green: 0.75, blue: 0.40, alpha: 1),  // green
     "T": NSColor(white: 1.0, alpha: 0.82),                       // bubble fill
+    "O": NSColor(red: 0.95, green: 0.55, blue: 0.20, alpha: 1),  // cat orange
+    "F": NSColor(red: 0.98, green: 0.92, blue: 0.80, alpha: 1),  // cream (fur/belly)
+    "N": NSColor(red: 0.35, green: 0.22, blue: 0.15, alpha: 1),  // dark brown (nose)
+    "M": NSColor(red: 0.62, green: 0.66, blue: 0.72, alpha: 1),  // robot metal
+    "C": NSColor(red: 0.30, green: 0.85, blue: 0.92, alpha: 1),  // robot screen cyan
+    "S": NSColor(red: 0.40, green: 0.82, blue: 0.50, alpha: 1),  // slime green
+    "Q": NSColor(red: 0.24, green: 0.58, blue: 0.34, alpha: 1),  // slime shade
 ]
 
 // MARK: - Pixel font (3x5, uppercase)
@@ -212,6 +219,237 @@ private func composeFrame(eyes: EyeStyle, tentacles: TentacleStyle,
     return grid
 }
 
+// MARK: - Additional species
+
+// Every species is drawn on the same 20x20 canvas the octopus uses: 4 spare
+// transparent rows on top (headroom for hats/crowns) plus 16 rows of body.
+// `petBody` right-pads each authored row to 20 columns so only the leading
+// art has to be counted exactly, and prepends the spare rows. Grid row N of
+// the body therefore lands at final grid row N + 4.
+private let petSpareRows = 4
+
+private func petBody(_ rows: [String]) -> [[Character]] {
+    let spare = Array(repeating: String(repeating: ".", count: 20), count: petSpareRows)
+    return (spare + rows).map { line -> [Character] in
+        var a = Array(line)
+        if a.count < 20 { a += Array(repeating: Character("."), count: 20 - a.count) }
+        else if a.count > 20 { a = Array(a.prefix(20)) }
+        return a
+    }
+}
+
+// --- Cat (orange tabby, sitting) ---
+
+private func catRows(eyes: EyeStyle) -> [String] {
+    let eyeRow: String
+    switch eyes {
+    case .open:   eyeRow = "..OOOWBOOOOOOWBOOO.."
+    case .closed: eyeRow = "..OOONNOOOOOONNOOO.."
+    case .wide:   eyeRow = "..OOWBBOOOOOWBBOOO.."
+    }
+    return [
+        ".OO..............OO.",
+        "OOOO............OOOO",
+        "..OOOOOOOOOOOOOOOO..",
+        "..OOOOOOOOOOOOOOOO..",
+        eyeRow,
+        "..OOOOOOOOOOOOOOOO..",
+        "..OOOOFFFFFFOOOOOO..",
+        "..OOOOFFNNFFOOOOOO..",
+        "..OOOOFFFFFFOOOOOO..",
+        "...OOOOOOOOOOOOOO...",
+        "...OOOOOOOOOOOOOO...",
+        "..OOOOFFFFFFFFOOOO..",
+        "..OOOFFFFFFFFFFOOO..",
+        "..OOOFFFFFFFFFFOOO..",
+        "..OFFO......OFFO....",
+        "..OOOO......OOOO....",
+    ]
+}
+
+private func catTail(_ g: inout [[Character]], variant: Int) {
+    // A curled tail on the right; its tip rises on the second frame so the
+    // cat gently swishes while idle.
+    let tipRow = variant == 0 ? 16 : 14
+    for r in tipRow...18 where r < g.count { g[r][18] = "O" }
+    g[18][17] = "O"
+}
+
+private func catWave(_ g: inout [[Character]], phase: Int) {
+    // Raise a front paw up beside the head and wave the pad.
+    for r in 9...13 { g[r][17] = "O"; g[r][18] = "O" }
+    let padRow = 7 + (phase % 2)
+    g[padRow][17] = "F"; g[padRow][18] = "F"
+}
+
+private func catAccessory(_ g: inout [[Character]], stage: PetStage) {
+    switch stage {
+    case .hatchling:
+        break
+    case .juggler:  // red collar with a gold tag
+        for c in 5...14 where g[13][c] == "F" || g[13][c] == "O" { g[13][c] = "R" }
+        g[13][9] = "G"; g[13][10] = "G"
+    case .ringmaster:  // little gold crown
+        for c in 6...13 { g[3][c] = "G" }
+        for c in [6, 9, 10, 13] { g[2][c] = "G" }
+    }
+}
+
+private func composeCat(eyes: EyeStyle, variant: Int, stage: PetStage,
+                        wave: Bool, wavePhase: Int) -> [[Character]] {
+    var g = petBody(catRows(eyes: eyes))
+    catTail(&g, variant: variant)
+    if wave { catWave(&g, phase: wavePhase) }
+    catAccessory(&g, stage: stage)
+    return g
+}
+
+// --- Robot ---
+
+private func robotRows(eyes: EyeStyle, variant: Int) -> [String] {
+    let e: Character
+    switch eyes {
+    case .open:   e = "B"
+    case .closed: e = "C"   // eyes off: blank screen
+    case .wide:   e = "R"   // red alert
+    }
+    let es = String(e)
+    let light = variant == 0 ? "C" : "M"   // antenna light blinks while idle
+    return [
+        "........\(light)...........",
+        "........M...........",
+        "...MMMMMMMMMMMM.....",
+        "..MMMMMMMMMMMMMM....",
+        "..MCCCCCCCCCCCCM....",
+        "..MCC\(es)\(es)CCCC\(es)\(es)CCM....",
+        "..MCCCCMMMMCCCCM....",
+        "..MMMMMMMMMMMMMM....",
+        "...MMMMMMMMMMMM.....",
+        ".M.MMMMMMMMMMMM.M...",
+        ".M.MMMMMMMMMMMM.M...",
+        ".M.MMMMMMMMMMMM.M...",
+        "...MMMMMMMMMMMM.....",
+        "...MMMM....MMMM.....",
+        "...MMMM....MMMM.....",
+        "..MMMMM....MMMMM....",
+    ]
+}
+
+private func robotWave(_ g: inout [[Character]], phase: Int) {
+    // Swing the right arm up beside the head.
+    let col = 16 + (phase % 2)
+    for r in 5...9 where col < 20 { g[r][col] = "M" }
+}
+
+private func robotAccessory(_ g: inout [[Character]], stage: PetStage) {
+    switch stage {
+    case .hatchling:
+        break
+    case .juggler:  // gold chest badge
+        for c in 8...10 { g[14][c] = "G" }
+        g[13][9] = "G"
+    case .ringmaster:  // gold antenna crown
+        g[4][8] = "G"
+        for c in 6...11 { g[3][c] = "G" }
+        for c in [6, 9, 11] { g[2][c] = "G" }
+    }
+}
+
+private func composeRobot(eyes: EyeStyle, variant: Int, stage: PetStage,
+                          wave: Bool, wavePhase: Int) -> [[Character]] {
+    var g = petBody(robotRows(eyes: eyes, variant: variant))
+    if wave { robotWave(&g, phase: wavePhase) }
+    robotAccessory(&g, stage: stage)
+    return g
+}
+
+// --- Slime ---
+
+private func slimeRows(eyes: EyeStyle) -> [String] {
+    let e: String
+    switch eyes {
+    case .open:   e = "BW"
+    case .closed: e = "QQ"
+    case .wide:   e = "WB"
+    }
+    return [
+        "........SSSS........",
+        "......SSSSSSSS......",
+        ".....SSSSSSSSSS.....",
+        "....SSSSSSSSSSSS....",
+        "...SSS\(e)SSSS\(e)SSS...",
+        "...SSSSSSSSSSSSSS...",
+        "..SSSSSSSSSSSSSSSS..",
+        "..SSSSSSSSSSSSSSSS..",
+        ".SSSSSSSSSSSSSSSSSS.",
+        ".SSSSSSSSSSSSSSSSSS.",
+        "SSSSSSSSSSSSSSSSSSSS",
+        "SSSSSSSSSSSSSSSSSSSS",
+        "SSSSSSSSSSSSSSSSSSSS",
+        "QQQQQQQQQQQQQQQQQQQQ",
+        ".QQQQQQQQQQQQQQQQQQ.",
+        "..QQQQQQQQQQQQQQQQ..",
+    ]
+}
+
+private func slimeShine(_ g: inout [[Character]], variant: Int) {
+    // A drifting highlight gives the blob a wet wobble between frames.
+    let col = variant == 0 ? 6 : 8
+    g[6][col] = "W"; g[7][col] = "W"
+}
+
+private func slimeWave(_ g: inout [[Character]], phase: Int) {
+    // No arms: raise little side nubs as if reaching up for attention.
+    let lift = phase % 2
+    for r in (5 - lift)...7 where r >= 0 { g[r][2] = "S"; g[r][17] = "S" }
+}
+
+private func slimeAccessory(_ g: inout [[Character]], stage: PetStage) {
+    switch stage {
+    case .hatchling:
+        break
+    case .juggler:  // a leafy sprout
+        g[3][10] = "E"; g[2][10] = "E"; g[3][11] = "E"
+    case .ringmaster:  // gold crown
+        for c in 6...13 { g[3][c] = "G" }
+        for c in [7, 10, 13] { g[2][c] = "G" }
+    }
+}
+
+private func composeSlime(eyes: EyeStyle, variant: Int, stage: PetStage,
+                          wave: Bool, wavePhase: Int) -> [[Character]] {
+    var g = petBody(slimeRows(eyes: eyes))
+    slimeShine(&g, variant: variant)
+    if wave { slimeWave(&g, phase: wavePhase) }
+    slimeAccessory(&g, stage: stage)
+    return g
+}
+
+// MARK: - Species registry
+
+// A species supplies only its body art; the palette, pixel renderer, speech
+// bubble, overview strip and animation timing are shared by all of them.
+struct PetSpecies {
+    let id: String
+    let displayName: String
+    fileprivate let compose: (_ eyes: EyeStyle, _ variant: Int, _ stage: PetStage,
+                              _ wave: Bool, _ wavePhase: Int) -> [[Character]]
+}
+
+let allPetSpecies: [PetSpecies] = [
+    PetSpecies(id: "octopus", displayName: "Octopus") { eyes, variant, stage, wave, phase in
+        composeFrame(eyes: eyes, tentacles: variant == 0 ? .a : .b,
+                     stage: stage, waveArm: wave, wavePhase: phase)
+    },
+    PetSpecies(id: "cat", displayName: "Cat", compose: composeCat),
+    PetSpecies(id: "robot", displayName: "Robot", compose: composeRobot),
+    PetSpecies(id: "slime", displayName: "Slime", compose: composeSlime),
+]
+
+func petSpecies(withID id: String) -> PetSpecies {
+    allPetSpecies.first { $0.id == id } ?? allPetSpecies[0]
+}
+
 private func texture(from grid: [[Character]], scale: Int) -> SKTexture {
     let h = grid.count
     let w = grid.map { $0.count }.max() ?? 0
@@ -336,6 +574,7 @@ final class PetScene: SKScene {
     private var bubbleRows: [PetBubbleRow] = []
     private var mode: PetMode = .idle
     private var stage: PetStage = .hatchling
+    private var species: PetSpecies = allPetSpecies[0]
     private var idleSince: TimeInterval = 0
     private var zzzEmitter: Timer?
     private var frameCache: [String: ([SKTexture], TimeInterval)] = [:]
@@ -354,7 +593,7 @@ final class PetScene: SKScene {
         backgroundColor = .clear
         octopus.size = CGSize(width: 80, height: 80)
         octopus.position = bodyCenter
-        octopus.name = "octopus"
+        octopus.name = "petBody"
         addChild(octopus)
 
         bubble.name = "bubble"
@@ -375,6 +614,13 @@ final class PetScene: SKScene {
         let s = PetStage(rawValue: min(newStage, 2)) ?? .hatchling
         guard s != stage else { return }
         stage = s
+        frameCache.removeAll()
+        applyMode(mode, force: true)
+    }
+
+    func setSpecies(_ id: String) {
+        guard id != species.id else { return }
+        species = petSpecies(withID: id)
         frameCache.removeAll()
         applyMode(mode, force: true)
     }
@@ -479,20 +725,19 @@ final class PetScene: SKScene {
     }
 
     private func frames(for mode: PetMode) -> ([SKTexture], TimeInterval) {
-        let cacheKey = "\(mode)-\(stage)"
+        let cacheKey = "\(species.id)-\(mode)-\(stage)"
         if let cached = frameCache[cacheKey] { return cached }
-        func f(_ eyes: EyeStyle, _ t: TentacleStyle, wave: Bool = false, phase: Int = 0) -> SKTexture {
-            texture(from: composeFrame(eyes: eyes, tentacles: t, stage: stage,
-                                       waveArm: wave, wavePhase: phase), scale: 4)
+        func f(_ eyes: EyeStyle, _ variant: Int, wave: Bool = false, phase: Int = 0) -> SKTexture {
+            texture(from: species.compose(eyes, variant, stage, wave, phase), scale: 4)
         }
         let result: ([SKTexture], TimeInterval)
         switch mode {
-        case .idle:    result = ([f(.open, .a), f(.open, .b)], 0.5)
-        case .sleep:   result = ([f(.closed, .a), f(.closed, .b)], 0.9)
-        case .busy:    result = ([f(.open, .a), f(.open, .b)], 0.25)
-        case .blocked: result = ([f(.open, .a, wave: true, phase: 0),
-                                  f(.open, .b, wave: true, phase: 1)], 0.35)
-        case .panic:   result = ([f(.wide, .a), f(.wide, .b)], 0.12)
+        case .idle:    result = ([f(.open, 0), f(.open, 1)], 0.5)
+        case .sleep:   result = ([f(.closed, 0), f(.closed, 1)], 0.9)
+        case .busy:    result = ([f(.open, 0), f(.open, 1)], 0.25)
+        case .blocked: result = ([f(.open, 0, wave: true, phase: 0),
+                                  f(.open, 1, wave: true, phase: 1)], 0.35)
+        case .panic:   result = ([f(.wide, 0), f(.wide, 1)], 0.12)
         }
         frameCache[cacheKey] = result
         return result
@@ -548,7 +793,7 @@ final class PetScene: SKScene {
             onRowClick?(bubbleRows.first?.id ?? "")
             return
         }
-        if nodes(at: loc).contains(where: { $0.name == "octopus" }) {
+        if nodes(at: loc).contains(where: { $0.name == "petBody" }) {
             // Click on the body opens the session menu; drag moves the window.
             if let win = view?.window,
                let next = win.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
@@ -588,14 +833,16 @@ final class PetController {
     private let scene: PetScene
     private var enabled = true
     private(set) var xp: Int
+    private(set) var speciesID: String
 
     var onAttach: ((String) -> Void)?
     var onOpenMenu: (() -> Void)?
     var onDismissBubble: (() -> Void)?
     var onXPChanged: ((Int) -> Void)?
 
-    init(initialXP: Int) {
+    init(initialXP: Int, initialSpecies: String) {
         xp = initialXP
+        speciesID = petSpecies(withID: initialSpecies).id
 
         let size = CGSize(width: 440, height: 290)
         panel = UnconstrainedPanel(
@@ -618,6 +865,7 @@ final class PetController {
         skView.presentScene(scene)
         panel.contentView = skView
 
+        scene.setSpecies(speciesID)
         scene.setStage(PetController.stage(forXP: xp))
         scene.onRowClick = { [weak self] id in
             if !id.isEmpty { self?.onAttach?(id) }
@@ -651,6 +899,13 @@ final class PetController {
         xp += 1
         scene.setStage(PetController.stage(forXP: xp))
         onXPChanged?(xp)
+    }
+
+    func setSpecies(_ id: String) {
+        let resolved = petSpecies(withID: id).id
+        guard resolved != speciesID else { return }
+        speciesID = resolved
+        scene.setSpecies(resolved)
     }
 
     func update(counts: PetStatusCounts, rows: [PetBubbleRow]) {

@@ -809,6 +809,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var petCheckbox: NSButton?
     var pet: PetController?
     var petEnabled = true
+    var petSpeciesID = "octopus"
+    var petPopup: NSPopUpButton?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -819,7 +821,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         attentionPanel.onAttach = { attachSession($0) }
         attentionPanel.onDismiss = { [weak self] in self?.snoozeCurrent() }
 
-        let petCtl = PetController(initialXP: (readConfig()["petXP"] as? Int) ?? 0)
+        petSpeciesID = (readConfig()["petSpecies"] as? String) ?? "octopus"
+        let petCtl = PetController(initialXP: (readConfig()["petXP"] as? Int) ?? 0,
+                                   initialSpecies: petSpeciesID)
         petCtl.onAttach = { [weak self] fileID in
             guard let self = self,
                   let s = self.lastSessions.first(where: { $0.fileID == fileID }) else { return }
@@ -872,6 +876,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         popoutEnabled = (config["popout"] as? Bool) ?? true
         petEnabled = (config["pet"] as? Bool) ?? true
         pet?.setEnabled(petEnabled)
+        petSpeciesID = (config["petSpecies"] as? String) ?? "octopus"
+        pet?.setSpecies(petSpeciesID)
         applyHotKey((config["hotkey"] as? String) ?? defaultHotKeySpec)
     }
 
@@ -992,6 +998,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tui.keyEquivalentModifierMask = []
         tui.target = self
         menu.addItem(tui)
+        let petMenuItem = NSMenuItem(title: "Pet", action: nil, keyEquivalent: "")
+        let petSubmenu = NSMenu()
+        for s in allPetSpecies {
+            let it = NSMenuItem(title: s.displayName,
+                                action: #selector(petSpeciesMenuAction(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = s.id
+            it.state = (s.id == petSpeciesID) ? .on : .off
+            petSubmenu.addItem(it)
+        }
+        petMenuItem.submenu = petSubmenu
+        menu.addItem(petMenuItem)
+
         let settings = NSMenuItem(title: "Settings…",
                                   action: #selector(openSettingsAction(_:)), keyEquivalent: ",")
         settings.keyEquivalentModifierMask = []
@@ -1017,6 +1036,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorderButton?.displaySpec = currentHotKey?.display ?? configuredHotKeySpec()
         popoutCheckbox?.state = popoutEnabled ? .on : .off
         petCheckbox?.state = petEnabled ? .on : .off
+        if let idx = allPetSpecies.firstIndex(where: { $0.id == petSpeciesID }) {
+            petPopup?.selectItem(at: idx)
+        }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
@@ -1049,6 +1071,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let petBox = NSButton(checkboxWithTitle: "Show desktop pet",
                               target: self, action: #selector(petToggled(_:)))
 
+        let petLabel = NSTextField(labelWithString: "Pet:")
+        let petPop = NSPopUpButton(frame: .zero, pullsDown: false)
+        petPop.target = self
+        petPop.action = #selector(petSpeciesChanged(_:))
+        for (i, s) in allPetSpecies.enumerated() {
+            petPop.addItem(withTitle: s.displayName)
+            petPop.item(at: i)?.representedObject = s.id
+        }
+        let petRow = NSStackView(views: [petLabel, petPop])
+        petRow.orientation = .horizontal
+        petRow.spacing = 8
+
         let hotkeyLabel = NSTextField(labelWithString: "Global hotkey:")
         let hotkeyRow = NSStackView(views: [hotkeyLabel, recorder])
         hotkeyRow.orientation = .horizontal
@@ -1059,14 +1093,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
 
-        let stack = NSStackView(views: [hotkeyRow, checkbox, petBox, hint])
+        let stack = NSStackView(views: [hotkeyRow, checkbox, petBox, petRow, hint])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 180),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 220),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "sticky-agent-monitor"
         win.isReleasedWhenClosed = false
@@ -1077,6 +1111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorderButton = recorder
         popoutCheckbox = checkbox
         petCheckbox = petBox
+        petPopup = petPop
     }
 
     @objc func petToggled(_ sender: NSButton) {
@@ -1085,6 +1120,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastConfigMtime = configModTime()  // our own write, already applied
         pet?.setEnabled(petEnabled)
         if petEnabled { updatePet(lastSessions) }
+    }
+
+    @objc func petSpeciesChanged(_ sender: NSPopUpButton) {
+        guard let id = sender.selectedItem?.representedObject as? String else { return }
+        selectPetSpecies(id)
+    }
+
+    // Switch the pet species from any entry point (settings popup or menu),
+    // persist it, and keep the pet visible so the change is immediately seen.
+    func selectPetSpecies(_ id: String) {
+        petSpeciesID = id
+        writeConfig(["petSpecies": id])
+        lastConfigMtime = configModTime()  // our own write, already applied
+        pet?.setSpecies(id)
+        if !petEnabled {
+            petEnabled = true
+            writeConfig(["pet": true])
+            lastConfigMtime = configModTime()
+            petCheckbox?.state = .on
+            pet?.setEnabled(true)
+        }
+        updatePet(lastSessions)
+    }
+
+    @objc func petSpeciesMenuAction(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        selectPetSpecies(id)
     }
 
     @objc func popoutToggled(_ sender: NSButton) {
