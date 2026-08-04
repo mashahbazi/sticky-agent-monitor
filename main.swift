@@ -28,6 +28,17 @@ let pollInterval: TimeInterval = 3.0
 let maxNumbered = 9   // sessions that get a 1-9 key equivalent in the menu
 let maxMenuRows = 20  // sessions listed before the "+N more" indicator
 
+// How long a finished agent's row lingers in the speech bubble / pop-out. It
+// reports an event you cannot act on any faster, so it behaves like a
+// notification and retires itself. Blocked agents ignore this and hold their
+// row until they are actually unblocked.
+let transientRowTTL: TimeInterval = 5.0
+
+// Rows the speech bubble can show before it outgrows the pet's window and gets
+// clipped. The overflow row replaces the last one, and since busy agents sort
+// last, they are what gets folded away first.
+let maxBubbleRows = 7
+
 // Global hotkey that pops the menubar menu open. Overridable at runtime via
 // config.json ("hotkey" key) or `sticky-agent-monitor --hotkey <spec>`;
 // the running app picks changes up on its next poll, no restart needed.
@@ -78,6 +89,12 @@ func statusMeta(_ status: String) -> StatusMeta {
     default:            return StatusMeta(glyph: "·", label: status.uppercased(), priority: 99, cat: .other)
     }
 }
+
+// Whether a category's row in the speech bubble / pop-out behaves like a
+// notification (appears on the transition into it, then retires itself) rather
+// than like a standing entry that holds until the agent moves on. A finished
+// agent is an event; a blocked or still-running one is a state.
+func isTransientRow(_ cat: Category) -> Bool { cat == .asked || cat == .done }
 
 // What the gate named in `waitingFor` means in plain words. The CLI writes
 // the dialog's own name there; anything unrecognized passes through as-is.
@@ -757,19 +774,21 @@ final class AttentionPanel: NSObject {
     private func rebuildRows() {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        // Sessions arrive sorted attention-first, so the stuck ones lead and
-        // the merely-asking ones follow. Each group gets its own heading: one
-        // is an interruption, the other is a to-do.
-        let stuck = sessions.filter { statusMeta($0.status).cat != .asked }
-        let asking = sessions.filter { statusMeta($0.status).cat == .asked }
+        // Three groups, in the order they deserve your attention: what is stuck,
+        // what just landed, what is still going. The dismiss button rides on
+        // whichever heading comes first.
+        let cat: (Session) -> Category = { statusMeta($0.status).cat }
+        let stuck = sessions.filter { cat($0) == .blocked || cat($0) == .error }
+        let finished = sessions.filter { isTransientRow(cat($0)) }
+        let running = sessions.filter { cat($0) == .busy }
 
-        if !stuck.isEmpty {
-            addHeader("Blocked — needs you now", withDismiss: true)
-            for s in stuck { addRow(s) }
-        }
-        if !asking.isEmpty {
-            addHeader("Done — waiting for your reply", withDismiss: stuck.isEmpty)
-            for s in asking { addRow(s) }
+        var first = true
+        for (title, group) in [("Blocked — needs you now", stuck),
+                               ("Just finished", finished),
+                               ("Still running", running)] where !group.isEmpty {
+            addHeader(title, withDismiss: first)
+            first = false
+            for s in group { addRow(s) }
         }
     }
 
@@ -801,8 +820,12 @@ final class AttentionPanel: NSObject {
         // Spelling out the gate is the whole point for a blocked agent: it
         // tells you whether to approve something or to answer something.
         let why = meta.cat == .blocked ? " — \(blockerReason(s.waitingFor))" : ""
+        // How long it has been stuck (or running) is worth knowing. How long a
+        // self-retiring row has left on screen is not, so those show no age —
+        // a number ticking toward its own disappearance says nothing.
+        let where_ = isTransientRow(meta.cat) ? leaf : "\(leaf), \(formatAgo(s))"
         let row = NSButton(
-            title: "\(meta.glyph)  \(name)   (\(leaf), \(formatAgo(s)))\(why)",
+            title: "\(meta.glyph)  \(name)   (\(where_))\(why)",
             target: self, action: #selector(rowClicked(_:)))
         row.isBordered = false
         row.alignment = .left
@@ -879,6 +902,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastConfigMtime: TimeInterval = -1
     var popoutEnabled = true
     var snoozed: Set<String> = []
+    // fileID -> when its self-retiring row expires. See needySessions.
+    var transientRows: [String: TimeInterval] = [:]
+    var transientTimer: Timer?
     let attentionPanel = AttentionPanel()
     var settingsWindow: NSWindow?
     var recorderButton: HotKeyRecorderButton?
@@ -958,21 +984,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyHotKey((config["hotkey"] as? String) ?? defaultHotKeySpec)
     }
 
-    // Which sessions the pop-out panel shows: the ones stuck at a gate, the
-    // errored ones, and the ones that finished by asking you something —
-    // minus ones snoozed via the panel's dismiss button. A snooze is keyed on
-    // session+status, so it clears itself as soon as the status changes.
-    // The panel and the pet bubble keep the two kinds visually apart; see the
-    // status model at the top of this file for why that matters.
+    // Which sessions the speech bubble / pop-out shows, and for how long. Two
+    // different lifetimes, matching the two different kinds of attention:
+    //
+    //   blocked, errored  a standing alarm. The row holds until the agent is
+    //                     actually unblocked (or snoozed with the dismiss
+    //                     button), because it will not move without you.
+    //   busy              a standing entry too — it holds while the agent runs
+    //                     — but sorted to the very end, under everything that
+    //                     wants something from you. Nothing to do about it yet;
+    //                     it is there so you can see the fleet is alive.
+    //   asked, done       an event. The row appears the moment the agent
+    //                     finishes and retires itself after transientRowTTL,
+    //                     exactly like a notification — there is nothing to
+    //                     hold open, and a growing list of finished agents is
+    //                     the noise this whole distinction exists to remove.
+    //
+    // The icon strip beside the pet is deliberately unaffected: it counts every
+    // session in every state, standing tally rather than attention queue.
+    // A snooze is keyed on session+status, so it clears itself as soon as the
+    // status changes.
     func needySessions(_ sessions: [Session]) -> [Session] {
-        let needy = sessions.filter {
-            switch statusMeta($0.status).cat {
-            case .blocked, .error, .asked: return true
-            default: return false
-            }
+        pruneTransientRows()
+        let needy = sessions.filter { s in
+            let cat = statusMeta(s.status).cat
+            if isTransientRow(cat) { return transientRows[s.fileID] != nil }
+            return cat == .blocked || cat == .error || cat == .busy
         }
+        let live = needy.filter { !snoozed.contains("\($0.fileID):\($0.status)") }
         snoozed.formIntersection(Set(needy.map { "\($0.fileID):\($0.status)" }))
-        return needy.filter { !snoozed.contains("\($0.fileID):\($0.status)") }
+        // `sessions` is already sorted attention-first; lifting the busy ones
+        // out and re-appending them keeps that order within each group while
+        // pinning "still running" to the bottom of the list.
+        return live.filter { statusMeta($0.status).cat != .busy }
+            + live.filter { statusMeta($0.status).cat == .busy }
+    }
+
+    // Give a session a row that expires on its own, and make sure something
+    // wakes up to retire it. Called on the same transitions that notify.
+    func showTransientRow(for fileID: String) {
+        transientRows[fileID] = Date().timeIntervalSince1970 + transientRowTTL
+        scheduleTransientSweep()
+    }
+
+    func pruneTransientRows() {
+        let now = Date().timeIntervalSince1970
+        transientRows = transientRows.filter { $0.value > now }
+    }
+
+    // The 3s poll is too coarse to retire a 5s row on time, so a one-shot
+    // timer fires the moment the earliest row expires and redraws from the last
+    // poll's sessions.
+    func scheduleTransientSweep() {
+        transientTimer?.invalidate()
+        transientTimer = nil
+        guard let earliest = transientRows.values.min() else { return }
+        let delay = max(0.1, earliest - Date().timeIntervalSince1970)
+        transientTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) {
+            [weak self] _ in
+            guard let self = self else { return }
+            self.transientTimer = nil
+            self.pruneTransientRows()
+            self.updateAttentionPanel(self.lastSessions)
+            self.updatePet(self.lastSessions)
+            self.scheduleTransientSweep()
+        }
     }
 
     // The pet's speech bubble takes over the attention role when it's
@@ -1001,18 +1077,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             default: break
             }
         }
-        let rows: [PetBubbleRow] = popoutEnabled ? needySessions(sessions).map { s in
+        var rows: [PetBubbleRow] = popoutEnabled ? needySessions(sessions).map { s in
+            let cat = statusMeta(s.status).cat
             let kind: PetAgentKind
-            switch statusMeta(s.status).cat {
+            switch cat {
             case .error: kind = .error
             case .asked: kind = .asked
+            case .done: kind = .done
+            case .busy: kind = .busy
             default: kind = .blocked
             }
+            // A self-retiring row shows no age: a number counting up to the
+            // moment the row vanishes tells you nothing. The extra width goes
+            // back to the name instead.
             var name = displayName(s)
-            if name.count > 20 { name = String(name.prefix(20)) }
+            let transient = isTransientRow(cat)
+            let room = transient ? 26 : 20
+            if name.count > room { name = String(name.prefix(room)) }
             return PetBubbleRow(id: s.fileID, kind: kind,
-                                text: "\(name) \(formatAgo(s))")
+                                text: transient ? name : "\(name) \(formatAgo(s))")
         } : []
+        if rows.count > maxBubbleRows {
+            let folded = rows.count - (maxBubbleRows - 1)
+            rows = Array(rows.prefix(maxBubbleRows - 1))
+            rows.append(PetBubbleRow(id: "", kind: .more, text: "+\(folded) more"))
+        }
         pet?.update(counts: counts, rows: rows)
     }
 
@@ -1039,9 +1128,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 notify(title: "Waiting for your reply",
                        message: "\(name) finished and asked you something",
                        attachJobId: s.shortJobId)
+                showTransientRow(for: s.fileID)
                 pet?.gainXP()  // the turn still completed
             } else if notifyDone.contains(status) && !notifyDone.contains(prev) {
                 notify(title: "Completed", message: "\(name) finished", attachJobId: s.shortJobId)
+                showTransientRow(for: s.fileID)
                 pet?.gainXP()  // the pet feeds on completed tasks
             } else if notifyError.contains(status) && !notifyError.contains(prev) {
                 if !popoutEnabled {

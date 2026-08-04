@@ -484,7 +484,8 @@ private func texture(from grid: [[Character]], scale: Int) -> SKTexture {
 
 // White bubble, black 1px border, notched pixel corners, tail bottom-right
 // pointing at the octopus. One line per session that wants you, with the icon
-// for why (bell = blocked, balloon = asked, cross = errored); the
+// for why (bell = blocked, balloon = asked, check = just finished, cross =
+// errored); the
 // text itself is drawn as real monospaced labels over the sprite, so the
 // grid only carries the frame and icons.
 private func bubbleGrid(icons: [Character]) -> [[Character]] {
@@ -549,8 +550,10 @@ private func overviewGrid(counts: [(icon: Character, count: Int)]) -> [[Characte
 // MARK: - Model
 
 // `blocked` = parked at a permission/input gate and cannot move; `asked` =
-// finished its turn with a question for you. Only the first is an alarm.
-enum PetAgentKind { case busy, blocked, asked, error }
+// finished its turn with a question for you; `done` = finished, nothing
+// pending; `more` = the "+N more" overflow line, which draws no icon and is
+// not clickable. Only `blocked` is an alarm.
+enum PetAgentKind { case busy, blocked, asked, done, error, more }
 
 struct PetBubbleRow {
     let id: String       // session fileID, used for click-to-attach
@@ -700,8 +703,10 @@ final class PetScene: SKScene {
             switch kind {
             case .blocked: return "b"
             case .asked: return "q"
+            case .done: return "c"
             case .error: return "x"
             case .busy: return "p"
+            case .more: return " "  // no pixel icon for this one
             }
         }
         let grid = bubbleGrid(icons: rows.map { iconFor($0.kind) })

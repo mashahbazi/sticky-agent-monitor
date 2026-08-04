@@ -36,20 +36,31 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   second is reported as a completion that expects a reply.
 - **Octoclaude, the desktop pet**: a pixel-art octopus (SpriteKit, all art
   composed in code, no assets) that embodies the fleet. A pixel icon strip
-  beside it mirrors the menubar counts; when an agent is blocked it waves and
-  shows a cartoony speech bubble listing the sessions that want you, each with
-  its own icon — bell for blocked, balloon for merely asking (pixel frame,
-  monospaced text). Click a bubble line to attach, right-click the bubble to
+  beside it mirrors the menubar counts (a standing tally of every session, in
+  every state); when an agent is blocked it waves and shows a cartoony speech
+  bubble listing the sessions that want you, each with its own icon — bell for
+  blocked, balloon for asking, check for just finished, hourglass for still
+  running (pixel frame, monospaced text). The bubble carries two row lifetimes:
+  **blocked**, errored and **busy** rows hold until the agent moves on, while an
+  agent that goes **asked** or **done** gets a row that appears on the
+  transition and retires itself 5 seconds later, like a notification — there is
+  nothing to hold open, and a growing list of finished agents is exactly the
+  noise the blocked/asked split exists to remove. Busy rows sort to the very
+  bottom, under everything that wants something from you, and self-retiring rows
+  show no age (a number ticking toward its own disappearance says nothing).
+  Beyond `maxBubbleRows` the tail folds into a "+N more" line, so the busy rows
+  are what gets hidden first. Click a bubble line to attach, right-click the bubble to
   snooze, click the octopus for the session menu, drag to move it. It sleeps
   when all is quiet, panics on errors, feeds on completed tasks (XP persisted
   in config) and earns a bandana at 25 completions and a top hat at 100.
   Disable via Settings ("Show desktop pet") or `"pet": false` in the config.
 - **Attention pop-out**: with the pet disabled, a floating panel takes over
   the speech bubble's job: it slides in under the menubar when an agent gets
-  blocked (or errors, or finishes with a question) and stays until the agent is
-  handled, unlike a notification your brain learns to dismiss. Two headings
-  keep the urgent group ("Blocked — needs you now") apart from the patient one
-  ("Done — waiting for your reply"). It never steals keyboard focus;
+  blocked (or errors, or finishes) and stays until the agent is handled, unlike
+  a notification your brain learns to dismiss. Three headings, with the same
+  lifetimes as the speech bubble: "Blocked — needs you now" and "Still running"
+  hold, "Just finished" retires itself after 5 seconds. It never steals keyboard
+  focus;
   clicking a row attaches, `✕` snoozes until the agent's status next
   changes. Disable with `"popout": false` in the config file.
 - **Keyboard-first attach**: menu items are numbered; plain `1`-`9` attaches
@@ -134,6 +145,8 @@ Tweak the constants near the top of `main.swift`:
 | `pollInterval`   | `3.0`                | Poll interval in seconds             |
 | `maxNumbered`    | `9`                  | Sessions that get a 1-9 shortcut     |
 | `maxMenuRows`    | `20`                 | Sessions listed before "+N more"     |
+| `transientRowTTL`| `5.0`                | Seconds a finished agent's row shows |
+| `maxBubbleRows`  | `7`                  | Bubble rows before a "+N more" line  |
 | `hotKeyCode`     | `kVK_ANSI_A`         | Global hotkey key (with Ctrl+Alt)    |
 
 ## How it works
