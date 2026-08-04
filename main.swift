@@ -980,6 +980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var busyCheckbox: NSButton?
     var notifyPopup: NSPopUpButton?
     var loginCheckbox: NSButton?
+    var petSizeSlider: NSSlider?
     var pet: PetController?
     var petEnabled = true
     var petSpeciesID = "octopus"
@@ -1016,6 +1017,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.lastConfigMtime = configModTime()  // our own write, already applied
         }
         pet = petCtl
+        // The pet lands somewhere other than the saved spot when that spot was
+        // off screen (or when there was nothing saved). Record where it
+        // actually went so the file never keeps a position you can't see.
+        if petCtl.origin != savedOrigin {
+            writeConfig(["petX": Double(petCtl.origin.x), "petY": Double(petCtl.origin.y)])
+        }
         timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
             self?.poll()
         }
@@ -1061,8 +1068,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         notifyMode = notifyModes.contains(mode) ? mode : "auto"
         petEnabled = (config["pet"] as? Bool) ?? true
         pet?.setEnabled(petEnabled)
+        pet?.setScale((config["petScale"] as? Double) ?? 1.0)
         petSpeciesID = (config["petSpecies"] as? String) ?? "octopus"
         pet?.setSpecies(petSpeciesID)
+        // Position follows the file too, so editing petX/petY is a way back
+        // when the pet is parked somewhere unreachable. Our own drag writes
+        // land here as a no-op: they already match the window.
+        if let x = config["petX"] as? Double, let y = config["petY"] as? Double {
+            pet?.setOrigin(NSPoint(x: x, y: y))
+        }
         applyHotKey((config["hotkey"] as? String) ?? defaultHotKeySpec)
     }
 
@@ -1296,8 +1310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(tui)
         let petMenuItem = NSMenuItem(title: "Pet", action: nil, keyEquivalent: "")
         let petSubmenu = NSMenu()
-        for s in allPetSpecies {
-            let it = NSMenuItem(title: s.displayName,
+        refreshPetSpecies()  // pick up pets installed via `npx petdex install`
+        let petLabels = petPickerLabels(allPetSpecies)
+        for (i, s) in allPetSpecies.enumerated() {
+            let it = NSMenuItem(title: petLabels[i],
                                 action: #selector(petSpeciesMenuAction(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = s.id
@@ -1337,10 +1353,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let idx = notifyModes.firstIndex(of: notifyMode) {
             notifyPopup?.selectItem(at: idx)
         }
+        refreshPetSpecies()  // pick up pets installed via `npx petdex install`
+        if let popup = petPopup {
+            popup.removeAllItems()
+            fillPetPopup(popup)
+        }
         if let idx = allPetSpecies.firstIndex(where: { $0.id == petSpeciesID }) {
             petPopup?.selectItem(at: idx)
         }
         loginCheckbox?.state = loginItemEnabled() ? .on : .off
+        petSizeSlider?.doubleValue = (readConfig()["petScale"] as? Double) ?? 1.0
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
@@ -1383,13 +1405,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let petPop = NSPopUpButton(frame: .zero, pullsDown: false)
         petPop.target = self
         petPop.action = #selector(petSpeciesChanged(_:))
-        for (i, s) in allPetSpecies.enumerated() {
-            petPop.addItem(withTitle: s.displayName)
-            petPop.item(at: i)?.representedObject = s.id
-        }
+        fillPetPopup(petPop)
         let petRow = NSStackView(views: [petLabel, petPop])
         petRow.orientation = .horizontal
         petRow.spacing = 8
+
+        let sizeLabel = NSTextField(labelWithString: "Pet size:")
+        let sizeSlider = NSSlider(value: 1.0, minValue: 0.5, maxValue: 2.0,
+                                  target: self, action: #selector(petSizeChanged(_:)))
+        sizeSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        let sizeRow = NSStackView(views: [sizeLabel, sizeSlider])
+        sizeRow.orientation = .horizontal
+        sizeRow.spacing = 8
 
         let notifyLabel = NSTextField(labelWithString: "Notifications:")
         let notifyPop = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -1427,7 +1454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         surfacesBox.alignment = .leading
         surfacesBox.spacing = 8
 
-        let stack = NSStackView(views: [hotkeyBox, surfacesBox, petRow, notifyRow, loginBox])
+        let stack = NSStackView(views: [hotkeyBox, surfacesBox, petRow, sizeRow, notifyRow, loginBox])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -1436,10 +1463,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Sized by hand, not from `stack.fittingSize`: the stack reports a width
         // narrower than its own widest child plus the insets, so fitting it
         // squeezes the notification popup and runs the longest checkbox label
-        // into the right edge. The rows at their natural sizes need 392x282;
-        // keep main's 430 width so there is a real right margin.
+        // into the right edge. Keep 430 wide for a real right margin, and tall
+        // enough for the surface toggles, the pet picker and size slider, the
+        // notification popup and the login row all at their natural heights.
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 290),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 325),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "sticky-agent-monitor"
         win.isReleasedWhenClosed = false
@@ -1455,6 +1483,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         petPopup = petPop
         notifyPopup = notifyPop
         loginCheckbox = loginBox
+        petSizeSlider = sizeSlider
+    }
+
+    @objc func petSizeChanged(_ sender: NSSlider) {
+        let scale = sender.doubleValue
+        pet?.setScale(scale)
+        writeConfig(["petScale": scale])
+        lastConfigMtime = configModTime()  // our own write, already applied
     }
 
     @objc func notifyModeChanged(_ sender: NSPopUpButton) {
@@ -1495,6 +1531,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func petSpeciesChanged(_ sender: NSPopUpButton) {
         guard let id = sender.selectedItem?.representedObject as? String else { return }
         selectPetSpecies(id)
+    }
+
+    // One item per species, in `allPetSpecies` order so `selectItem(at:)` still
+    // lines up. Items go through the menu rather than `addItem(withTitle:)`,
+    // which removes any existing item with the same title and would drop a pet.
+    private func fillPetPopup(_ popup: NSPopUpButton) {
+        let labels = petPickerLabels(allPetSpecies)
+        for (i, s) in allPetSpecies.enumerated() {
+            let it = NSMenuItem(title: labels[i], action: nil, keyEquivalent: "")
+            it.representedObject = s.id
+            popup.menu?.addItem(it)
+        }
     }
 
     // Switch the pet species from any entry point (settings popup or menu),
