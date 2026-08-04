@@ -12,33 +12,44 @@ attach to a session, in a new iTerm tab, without touching the mouse.
 
 ## Features
 
-- **Menubar glyph summary**: `🔔` waiting for input, `⛔` blocked/error,
-  `▶` busy, `✓` done, each with a count. The bell only appears when an agent
-  actually needs you, so a glance tells you whether to switch contexts.
+- **Menubar glyph summary**: `🔔` blocked (stuck at a permission prompt or
+  question dialog), `⛔` error, `💬` finished and asked you something, `▶` busy,
+  `✓` done, each with a count. The bell only appears when an agent genuinely
+  cannot continue, so a glance tells you whether to switch contexts now.
 - **Global hotkey (Ctrl+Alt+A, configurable)**: pops the menu open from any
   app. Uses Carbon's `RegisterEventHotKey`, so it needs no Accessibility
   permission and the keypress never leaks into the focused app. Change it in
   the Settings window (menu > Settings…, click the hotkey, press a new
   combination) or with `sticky-agent-monitor --hotkey "cmd+shift+k"`: the
   running instance re-registers immediately, no restart.
-- **Real "needs input" detection**: session files only ever report
-  busy/idle, so they can't distinguish "done" from "asked you a question".
-  The monitor overlays the `state` field from `claude agents --json`
-  ("working" / "done" / "blocked"), where `blocked` means the agent is
-  waiting on you. That's what triggers the bell and the pop-out.
+- **Blocked vs. just asking**: two situations both look like "the agent
+  stopped", and conflating them is what makes a monitor cry wolf. An agent
+  parked at a permission prompt or an `AskUserQuestion` dialog *cannot take
+  one more step* until you act; the session file marks it `status: "waiting"`
+  and names the gate in `waitingFor` (`🔔`, with the reason spelled out on the
+  row: "needs permission" / "needs an answer"). An agent that simply ended its
+  turn with a question is idle and just wants your next prompt whenever you
+  get to it (`💬`). `claude agents --json` reports `state: "blocked"` for
+  *both* — for the second it infers that from the closing prose, not from a
+  real gate — so the monitor uses `waitingFor` to tell them apart. Only the
+  first raises the bell, panics the pet, or fires an urgent notification; the
+  second is reported as a completion that expects a reply.
 - **Octoclaude, the desktop pet**: a pixel-art octopus (SpriteKit, all art
   composed in code, no assets) that embodies the fleet. A pixel icon strip
-  beside it mirrors the menubar counts; when an agent needs you it waves and
-  shows a cartoony speech bubble listing the waiting sessions (pixel frame,
+  beside it mirrors the menubar counts; when an agent is blocked it waves and
+  shows a cartoony speech bubble listing the sessions that want you, each with
+  its own icon — bell for blocked, balloon for merely asking (pixel frame,
   monospaced text). Click a bubble line to attach, right-click the bubble to
   snooze, click the octopus for the session menu, drag to move it. It sleeps
   when all is quiet, panics on errors, feeds on completed tasks (XP persisted
   in config) and earns a bandana at 25 completions and a top hat at 100.
   Disable via Settings ("Show desktop pet") or `"pet": false` in the config.
 - **Attention pop-out**: with the pet disabled, a floating panel takes over
-  the speech bubble's job: it slides in under the menubar when an agent
-  starts waiting (or errors) and stays until the agent is handled, unlike a
-  notification your brain learns to dismiss. It never steals keyboard focus;
+  the speech bubble's job: it slides in under the menubar when an agent gets
+  blocked (or errors, or finishes with a question) and stays until the agent is
+  handled, unlike a notification your brain learns to dismiss. Two headings
+  keep the urgent group ("Blocked — needs you now") apart from the patient one
+  ("Done — waiting for your reply"). It never steals keyboard focus;
   clicking a row attaches, `✕` snoozes until the agent's status next
   changes. Disable with `"popout": false` in the config file.
 - **Keyboard-first attach**: menu items are numbered; plain `1`-`9` attaches
@@ -127,9 +138,11 @@ Tweak the constants near the top of `main.swift`:
 
 ## How it works
 
-Each session JSON file contains fields such as `status`, `name`, `cwd`,
-`sessionId`, `jobId`, and `updatedAt`. Files whose `pid` is no longer running
-are ignored as stale. Each `status` maps to a glyph and sort priority; the
+Each session JSON file contains fields such as `status`, `waitingFor`, `name`,
+`cwd`, `sessionId`, `jobId`, and `updatedAt`. Files whose `pid` is no longer
+running are ignored as stale. Each `status` maps to a glyph and sort priority
+(see the status model at the top of `main.swift` for how a live gate is told
+apart from a finished turn that asked a question); the
 menu is rebuilt lazily each time it opens (`menuNeedsUpdate`), so it is
 always fresh and there is no poll-vs-open race. State transitions (e.g.
 `busy → waiting`) trigger notifications.

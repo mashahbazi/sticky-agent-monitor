@@ -8,6 +8,7 @@
 //   ./sticky-agent-monitor --foreground  run attached to this terminal
 //   ./sticky-agent-monitor --stop        stop the running background instance
 //   ./sticky-agent-monitor --status      check whether it's running
+//   ./sticky-agent-monitor --list        print each session's classified state
 //   ./sticky-agent-monitor --attach <id> attach to a session by job id (used
 //                                        by notification clicks / launchers)
 
@@ -35,11 +36,25 @@ let defaultHotKeySpec = "ctrl+alt+a"
 
 // MARK: - Status model
 //
-// In practice a background agent only ever reports "busy" or "idle": there is
-// no distinct "completed" status to tell "finished this task" apart from
-// "finished and just sitting there". So "idle" is treated as done, full stop.
+// Two very different situations both look like "the agent stopped", and
+// treating them the same is what makes a monitor cry wolf:
+//
+//   BLOCKED  the agent is parked at a gate right now — a permission prompt,
+//            an AskUserQuestion dialog, a sandbox/worker request. It cannot
+//            take one more step until you act. The session file says
+//            status "waiting" and names the gate in `waitingFor`.
+//   ASKED    the agent finished its turn and its closing message asked you
+//            something ("which approach?", "shall I continue?"). Nothing is
+//            parked: it is idle, exactly like a plain completion, and just
+//            wants your next prompt whenever you get to it.
+//
+// `claude agents --json` reports state "blocked" for BOTH — for the second
+// case it infers that from the agent's closing prose, not from an actual
+// gate — so `state` alone cannot separate them. `waitingFor` can.
+//
+// Only BLOCKED is urgent. ASKED is a completion with a follow-up question.
 
-enum Category { case waiting, error, busy, done, stopped, other }
+enum Category { case blocked, error, asked, busy, done, stopped, other }
 
 struct StatusMeta {
     let glyph: String
@@ -50,10 +65,11 @@ struct StatusMeta {
 
 func statusMeta(_ status: String) -> StatusMeta {
     switch status {
-    case "waiting":     return StatusMeta(glyph: "🔔", label: "WAITING", priority: 0, cat: .waiting)
-    case "needs_input": return StatusMeta(glyph: "🔔", label: "NEEDS INPUT", priority: 0, cat: .waiting)
-    case "blocked":     return StatusMeta(glyph: "⛔", label: "BLOCKED", priority: 1, cat: .error)
-    case "error":       return StatusMeta(glyph: "⛔", label: "ERROR", priority: 2, cat: .error)
+    case "waiting", "needs_input", "blocked":
+                        return StatusMeta(glyph: "🔔", label: "BLOCKED", priority: 0, cat: .blocked)
+    case "error", "failed":
+                        return StatusMeta(glyph: "⛔", label: "ERROR", priority: 1, cat: .error)
+    case "asked":       return StatusMeta(glyph: "💬", label: "ASKED", priority: 2, cat: .asked)
     case "busy", "running", "working":
                         return StatusMeta(glyph: "▶", label: "BUSY", priority: 3, cat: .busy)
     case "idle", "completed", "done":
@@ -63,10 +79,26 @@ func statusMeta(_ status: String) -> StatusMeta {
     }
 }
 
-// Statuses that trigger notifications when transitioned INTO.
-let notifyWaiting: Set<String> = ["waiting", "needs_input"]
+// What the gate named in `waitingFor` means in plain words. The CLI writes
+// the dialog's own name there; anything unrecognized passes through as-is.
+func blockerReason(_ waitingFor: String?) -> String {
+    switch waitingFor {
+    case "permission prompt": return "needs permission"
+    case "input needed":      return "needs an answer"
+    case "dialog open":       return "dialog open"
+    case "worker request":    return "worker request"
+    case "sandbox request":   return "sandbox request"
+    case let other?:          return other
+    case nil:                 return "needs you"
+    }
+}
+
+// Statuses that trigger notifications when transitioned INTO. The buckets are
+// disjoint: every status belongs to exactly one.
+let notifyBlocked: Set<String> = ["waiting", "needs_input", "blocked"]
+let notifyAsked: Set<String> = ["asked"]
 let notifyDone: Set<String> = ["completed", "done", "idle"]
-let notifyError: Set<String> = ["error", "blocked"]
+let notifyError: Set<String> = ["error", "failed"]
 
 // MARK: - Session model
 
@@ -76,14 +108,25 @@ struct Session {
     let mtime: TimeInterval
 
     // Richer state from `claude agents --json`, overlaid after reading the
-    // session file. The file's own `status` only ever reports busy/idle: it
-    // cannot distinguish "done" from "asked the user a question and is
-    // waiting". The CLI's `state` can ("working" / "done" / "blocked").
+    // session file: "working" / "done" / "blocked" / "failed". Useful for
+    // telling a finished turn that ended in a question ("blocked") from one
+    // that didn't ("done") — but see `status`: it says nothing about whether
+    // the agent is actually stuck.
     var state: String?
 
     var pid: Int32 { (raw["pid"] as? NSNumber)?.int32Value ?? 0 }
     var fileStatus: String { ((raw["status"] as? String) ?? "unknown").lowercased() }
+
+    // Present only while the session sits at a gate it cannot pass on its
+    // own: "permission prompt", "input needed", "dialog open", "worker
+    // request", "sandbox request". This is the real "stuck" signal.
+    var waitingFor: String? { raw["waitingFor"] as? String }
+
     var status: String {
+        // A live gate is the one unambiguous "needs you NOW", and the session
+        // file reports it first-hand — so it outranks the CLI's `state`,
+        // which for a parked session also just says "blocked".
+        if fileStatus == "waiting" || waitingFor != nil { return "waiting" }
         guard let st = state else { return fileStatus }
         switch st {
         case "working":
@@ -92,7 +135,12 @@ struct Session {
             // busy/idle is the reliable "is it actually computing" signal.
             return fileStatus == "busy" ? "busy" : fileStatus
         case "done": return "done"
-        case "blocked": return "needs_input"  // agent is waiting on the user
+        case "blocked":
+            // Inferred from the closing message, not from a gate (we already
+            // ruled one out above): the turn is over and the agent asked for
+            // something. "Reply when you can", not "come here now".
+            return "asked"
+        case "failed": return "error"
         default: return st.lowercased()
         }
     }
@@ -163,7 +211,10 @@ let claudePath: String? = {
     return found.isEmpty ? nil : found
 }()
 
-// sessionId -> state ("working" / "done" / "blocked") from the claude CLI.
+// sessionId -> state ("working" / "done" / "blocked" / "failed") from the
+// claude CLI. Note the CLI derives "blocked" from the agent's closing prose,
+// so it covers both a real gate and a mere trailing question; `Session.status`
+// uses the session file's `waitingFor` to separate the two.
 func fetchAgentStates() -> [String: String] {
     guard let claude = claudePath else { return [:] }
     let out = runCapture([claude, "agents", "--json"])
@@ -643,10 +694,12 @@ func configModTime() -> TimeInterval {
 // MARK: - Attention panel
 //
 // A floating, non-activating panel that slides in under the menubar whenever
-// an agent is waiting for input or errored. Unlike a notification it cannot
-// be reflex-dismissed: it stays until the agent is handled (or snoozed with
-// its dismiss button), and it never steals keyboard focus from what you're
-// typing. Clicking a row attaches to that agent.
+// an agent is blocked, errored, or finished by asking you something — grouped
+// under separate headings, because the first two want you now and the third
+// only wants a reply. Unlike a notification it cannot be reflex-dismissed: it
+// stays until the agent is handled (or snoozed with its dismiss button), and it
+// never steals keyboard focus from what you're typing. Clicking a row attaches
+// to that agent.
 
 final class AttentionPanel: NSObject {
     private let panel: NSPanel
@@ -704,35 +757,58 @@ final class AttentionPanel: NSObject {
     private func rebuildRows() {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
+        // Sessions arrive sorted attention-first, so the stuck ones lead and
+        // the merely-asking ones follow. Each group gets its own heading: one
+        // is an interruption, the other is a to-do.
+        let stuck = sessions.filter { statusMeta($0.status).cat != .asked }
+        let asking = sessions.filter { statusMeta($0.status).cat == .asked }
+
+        if !stuck.isEmpty {
+            addHeader("Blocked — needs you now", withDismiss: true)
+            for s in stuck { addRow(s) }
+        }
+        if !asking.isEmpty {
+            addHeader("Done — waiting for your reply", withDismiss: stuck.isEmpty)
+            for s in asking { addRow(s) }
+        }
+    }
+
+    private func addHeader(_ text: String, withDismiss: Bool) {
         let header = NSStackView()
         header.orientation = .horizontal
         header.spacing = 8
-        let title = NSTextField(labelWithString: "Agents need you")
+        let title = NSTextField(labelWithString: text)
         title.font = NSFont.boldSystemFont(ofSize: 12)
         title.textColor = .secondaryLabelColor
-        let dismiss = NSButton(title: "✕", target: self, action: #selector(dismissClicked(_:)))
-        dismiss.isBordered = false
-        dismiss.font = NSFont.systemFont(ofSize: 11)
         header.addArrangedSubview(title)
         header.addArrangedSubview(NSView())  // spacer
-        header.addArrangedSubview(dismiss)
+        if withDismiss {
+            let dismiss = NSButton(title: "✕", target: self, action: #selector(dismissClicked(_:)))
+            dismiss.isBordered = false
+            dismiss.font = NSFont.systemFont(ofSize: 11)
+            header.addArrangedSubview(dismiss)
+        }
         stack.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
+    }
 
-        for (i, s) in sessions.enumerated() {
-            let meta = statusMeta(s.status)
-            var name = displayName(s)
-            if name.count > 40 { name = String(name.prefix(38)) + "…" }
-            let leaf = (s.cwd as NSString).lastPathComponent
-            let row = NSButton(
-                title: "\(meta.glyph)  \(name)   (\(leaf), \(formatAgo(s)))",
-                target: self, action: #selector(rowClicked(_:)))
-            row.isBordered = false
-            row.alignment = .left
-            row.font = NSFont.systemFont(ofSize: 13)
-            row.tag = i
-            stack.addArrangedSubview(row)
-        }
+    private func addRow(_ s: Session) {
+        guard let i = sessions.firstIndex(where: { $0.fileID == s.fileID }) else { return }
+        let meta = statusMeta(s.status)
+        var name = displayName(s)
+        if name.count > 40 { name = String(name.prefix(38)) + "…" }
+        let leaf = (s.cwd as NSString).lastPathComponent
+        // Spelling out the gate is the whole point for a blocked agent: it
+        // tells you whether to approve something or to answer something.
+        let why = meta.cat == .blocked ? " — \(blockerReason(s.waitingFor))" : ""
+        let row = NSButton(
+            title: "\(meta.glyph)  \(name)   (\(leaf), \(formatAgo(s)))\(why)",
+            target: self, action: #selector(rowClicked(_:)))
+        row.isBordered = false
+        row.alignment = .left
+        row.font = NSFont.systemFont(ofSize: 13)
+        row.tag = i
+        stack.addArrangedSubview(row)
     }
 
     private func show() {
@@ -782,8 +858,9 @@ func menubarTitle(_ sessions: [Session]) -> String {
     var counts: [Category: Int] = [:]
     for s in sessions { counts[statusMeta(s.status).cat, default: 0] += 1 }
     var parts: [String] = []
-    if let n = counts[.waiting], n > 0 { parts.append("🔔\(n)") }
+    if let n = counts[.blocked], n > 0 { parts.append("🔔\(n)") }
     if let n = counts[.error], n > 0 { parts.append("⛔\(n)") }
+    if let n = counts[.asked], n > 0 { parts.append("💬\(n)") }
     if let n = counts[.busy], n > 0 { parts.append("▶\(n)") }
     if let n = counts[.done], n > 0 { parts.append("✓\(n)") }
     return parts.isEmpty ? "–" : parts.joined(separator: " ")
@@ -881,13 +958,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyHotKey((config["hotkey"] as? String) ?? defaultHotKeySpec)
     }
 
-    // Which sessions the pop-out panel shows: waiting or errored, minus ones
-    // snoozed via the panel's dismiss button. A snooze is keyed on
+    // Which sessions the pop-out panel shows: the ones stuck at a gate, the
+    // errored ones, and the ones that finished by asking you something —
+    // minus ones snoozed via the panel's dismiss button. A snooze is keyed on
     // session+status, so it clears itself as soon as the status changes.
+    // The panel and the pet bubble keep the two kinds visually apart; see the
+    // status model at the top of this file for why that matters.
     func needySessions(_ sessions: [Session]) -> [Session] {
         let needy = sessions.filter {
-            let cat = statusMeta($0.status).cat
-            return cat == .waiting || cat == .error
+            switch statusMeta($0.status).cat {
+            case .blocked, .error, .asked: return true
+            default: return false
+            }
         }
         snoozed.formIntersection(Set(needy.map { "\($0.fileID):\($0.status)" }))
         return needy.filter { !snoozed.contains("\($0.fileID):\($0.status)") }
@@ -911,15 +993,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var counts = PetStatusCounts()
         for s in sessions {
             switch statusMeta(s.status).cat {
-            case .waiting: counts.waiting += 1
+            case .blocked: counts.blocked += 1
             case .error: counts.error += 1
+            case .asked: counts.asked += 1
             case .busy: counts.busy += 1
             case .done: counts.done += 1
             default: break
             }
         }
         let rows: [PetBubbleRow] = popoutEnabled ? needySessions(sessions).map { s in
-            let kind: PetAgentKind = statusMeta(s.status).cat == .error ? .error : .waiting
+            let kind: PetAgentKind
+            switch statusMeta(s.status).cat {
+            case .error: kind = .error
+            case .asked: kind = .asked
+            default: kind = .blocked
+            }
             var name = displayName(s)
             if name.count > 20 { name = String(name.prefix(20)) }
             return PetBubbleRow(id: s.fileID, kind: kind,
@@ -935,14 +1023,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             current[s.fileID] = status
             guard let prev = prevStates[s.fileID] else { continue }
             let name = displayName(s)
-            // Waiting/error are the attention panel's job; notifying too
+            // Blocked/error are the attention panel's job; notifying too
             // would just double up. Only fall back to notifications for them
-            // when the pop-out is disabled. "Completed" has no panel row, so
-            // it always notifies.
-            if notifyWaiting.contains(status) && !notifyWaiting.contains(prev) {
+            // when the pop-out is disabled. Finishing has no panel row, so it
+            // always notifies — and an agent that finished by asking is a
+            // finish, not an alarm: same "you can look whenever" tone, only
+            // the wording says a reply is expected.
+            if notifyBlocked.contains(status) && !notifyBlocked.contains(prev) {
                 if !popoutEnabled {
-                    notify(title: "Needs Input", message: "\(name) is waiting for you", attachJobId: s.shortJobId)
+                    notify(title: "Blocked",
+                           message: "\(name) \(blockerReason(s.waitingFor))",
+                           attachJobId: s.shortJobId)
                 }
+            } else if notifyAsked.contains(status) && !notifyAsked.contains(prev) {
+                notify(title: "Waiting for your reply",
+                       message: "\(name) finished and asked you something",
+                       attachJobId: s.shortJobId)
+                pet?.gainXP()  // the turn still completed
             } else if notifyDone.contains(status) && !notifyDone.contains(prev) {
                 notify(title: "Completed", message: "\(name) finished", attachJobId: s.shortJobId)
                 pet?.gainXP()  // the pet feeds on completed tasks
@@ -973,8 +1070,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if name.count > 44 { name = String(name.prefix(42)) + "…" }
             let leaf = (s.cwd as NSString).lastPathComponent
             let ago = formatAgo(s)
+            let why = meta.cat == .blocked ? " — \(blockerReason(s.waitingFor))" : ""
             let item = NSMenuItem(
-                title: "\(meta.glyph)  \(name)   (\(leaf), \(ago))",
+                title: "\(meta.glyph)  \(name)   (\(leaf), \(ago))\(why)",
                 action: #selector(attachAction(_:)),
                 keyEquivalent: i < maxNumbered ? "\(i + 1)" : ""
             )
@@ -1216,6 +1314,23 @@ func cmdStatus() {
     }
 }
 
+// Print what the monitor currently thinks of every session, one line each.
+// Mainly here to check the blocked-vs-asked call without squinting at the
+// menubar: it shows the raw inputs next to the verdict.
+func cmdList() {
+    let sessions = loadSessions()
+    if sessions.isEmpty { print("no active sessions"); return }
+    for s in sessions {
+        let meta = statusMeta(s.status)
+        var line = "\(meta.glyph) \(meta.label.padding(toLength: 8, withPad: " ", startingAt: 0))"
+        line += "  \(displayName(s))"
+        line += "  [file=\(s.fileStatus) state=\(s.state ?? "-")"
+        if let w = s.waitingFor { line += " waitingFor=\(w)" }
+        line += "]"
+        print(line)
+    }
+}
+
 func cmdStop() {
     guard let pid = readPidFile(), procAlive(pid) else {
         print("not running")
@@ -1303,6 +1418,7 @@ let args = CommandLine.arguments
 
 if args.contains("--stop") { cmdStop(); exit(0) }
 if args.contains("--status") { cmdStatus(); exit(0) }
+if args.contains("--list") { cmdList(); exit(0) }
 if let i = args.firstIndex(of: "--attach"), i + 1 < args.count {
     cmdAttach(args[i + 1])
     exit(0)

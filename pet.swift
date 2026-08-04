@@ -1,8 +1,10 @@
 // Octoclaude: a pixel-art octopus desktop pet that embodies the agent fleet.
-// A pixel icon strip beside it mirrors the menubar overview (bell/play/
-// check/cross with counts), and when an agent needs you it raises a tentacle
-// and shows a cartoony speech bubble with the waiting sessions, rendered in
-// a tiny hand-drawn pixel font. Feeds on completed tasks (XP persisted in
+// A pixel icon strip beside it mirrors the menubar overview (bell/balloon/
+// play/check/cross with counts), and when an agent is blocked it raises a
+// tentacle and shows a cartoony speech bubble with the sessions that want
+// you, rendered in a tiny hand-drawn pixel font. A blocked agent gets the
+// bell; one that only asked a question gets the balloon and no waving.
+// Feeds on completed tasks (XP persisted in
 // config.json) and evolves accessories with age.
 //
 // All art is composed in code from character pixel grids and rendered to
@@ -89,7 +91,8 @@ private let pixelFont: [Character: [String]] = [
 
 // 5x5 status icons matching the menubar glyphs.
 private let pixelIcons: [Character: (rows: [String], color: Character)] = [
-    "b": (["..X..", ".XXX.", ".XXX.", "XXXXX", "..X.."], "A"),  // bell, waiting
+    "b": (["..X..", ".XXX.", ".XXX.", "XXXXX", "..X.."], "A"),  // bell, blocked
+    "q": (["XXXXX", "X...X", "XXXXX", ".X...", "....."], "C"),  // balloon, asked
     "p": (["XXXXX", ".X.X.", "..X..", ".X.X.", "XXXXX"], "L"),  // hourglass, busy
     "c": (["....X", "...XX", "X.XX.", "XXX..", ".X..."], "E"),  // check, done
     "x": (["X...X", ".X.X.", "..X..", ".X.X.", "X...X"], "R"),  // cross, error
@@ -480,7 +483,8 @@ private func texture(from grid: [[Character]], scale: Int) -> SKTexture {
 // MARK: - Speech bubble
 
 // White bubble, black 1px border, notched pixel corners, tail bottom-right
-// pointing at the octopus. One line per waiting session with its icon; the
+// pointing at the octopus. One line per session that wants you, with the icon
+// for why (bell = blocked, balloon = asked, cross = errored); the
 // text itself is drawn as real monospaced labels over the sprite, so the
 // grid only carries the frame and icons.
 private func bubbleGrid(icons: [Character]) -> [[Character]] {
@@ -544,7 +548,9 @@ private func overviewGrid(counts: [(icon: Character, count: Int)]) -> [[Characte
 
 // MARK: - Model
 
-enum PetAgentKind { case busy, waiting, error }
+// `blocked` = parked at a permission/input gate and cannot move; `asked` =
+// finished its turn with a question for you. Only the first is an alarm.
+enum PetAgentKind { case busy, blocked, asked, error }
 
 struct PetBubbleRow {
     let id: String       // session fileID, used for click-to-attach
@@ -553,7 +559,8 @@ struct PetBubbleRow {
 }
 
 struct PetStatusCounts {
-    var waiting = 0
+    var blocked = 0
+    var asked = 0
     var error = 0
     var busy = 0
     var done = 0
@@ -640,15 +647,18 @@ final class PetScene: SKScene {
         updateOverview(counts)
         updateBubble(rows)
 
+        // The body only escalates for agents that are genuinely stuck. One
+        // that merely ended its turn with a question leaves the pet calm —
+        // its bubble row is enough.
         let newMode: PetMode
         if counts.error > 0 {
             newMode = .panic
-        } else if !rows.isEmpty {
+        } else if counts.blocked > 0 {
             newMode = .blocked
         } else if counts.busy > 0 {
             newMode = .busy
-        } else if CACurrentMediaTime() - idleSince > 90 {
-            newMode = .sleep
+        } else if rows.isEmpty && CACurrentMediaTime() - idleSince > 90 {
+            newMode = .sleep  // stay awake while a bubble is still up
         } else {
             newMode = .idle
         }
@@ -659,11 +669,11 @@ final class PetScene: SKScene {
     }
 
     private func updateOverview(_ counts: PetStatusCounts) {
-        let key = "\(counts.waiting)/\(counts.error)/\(counts.busy)/\(counts.done)"
+        let key = "\(counts.blocked)/\(counts.error)/\(counts.asked)/\(counts.busy)/\(counts.done)"
         guard key != lastOverviewKey else { return }
         lastOverviewKey = key
         let grid = overviewGrid(counts: [
-            ("b", counts.waiting), ("x", counts.error),
+            ("b", counts.blocked), ("x", counts.error), ("q", counts.asked),
             ("p", counts.busy), ("c", counts.done),
         ])
         if grid.isEmpty {
@@ -688,7 +698,8 @@ final class PetScene: SKScene {
         if !bubble.isHidden && sameIds && sameText { return }
         let iconFor: (PetAgentKind) -> Character = { kind in
             switch kind {
-            case .waiting: return "b"
+            case .blocked: return "b"
+            case .asked: return "q"
             case .error: return "x"
             case .busy: return "p"
             }
