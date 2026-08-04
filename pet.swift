@@ -773,6 +773,14 @@ final class PetScene: SKScene {
         ]))
     }
 
+    // Whether a scene point lands on something the pet actually draws (the
+    // body or the speech bubble). Everything else is empty transparent window
+    // that should let clicks fall through to whatever is underneath.
+    func isInteractive(at sceneLocation: CGPoint) -> Bool {
+        if !bubble.isHidden && bubble.contains(sceneLocation) { return true }
+        return nodes(at: sceneLocation).contains { $0.name == "petBody" }
+    }
+
     private func bubbleRowIndex(at sceneLocation: CGPoint) -> Int? {
         guard !bubble.isHidden, bubble.contains(sceneLocation) else { return nil }
         let topY = bubble.position.y + bubble.size.height
@@ -831,6 +839,8 @@ private final class UnconstrainedPanel: NSPanel {
 final class PetController {
     private let panel: NSPanel
     private let scene: PetScene
+    private let skView: SKView
+    private var mouseMonitors: [Any] = []
     private var enabled = true
     private(set) var xp: Int
     private(set) var speciesID: String
@@ -858,12 +868,17 @@ final class PetController {
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = false
 
-        let skView = SKView(frame: NSRect(origin: .zero, size: size))
+        skView = SKView(frame: NSRect(origin: .zero, size: size))
         skView.allowsTransparency = true
         scene = PetScene(size: size)
         scene.scaleMode = .resizeFill
         skView.presentScene(scene)
         panel.contentView = skView
+
+        // Most of the window is empty transparent space. Start click-through
+        // and only capture the mouse while the cursor is actually over the
+        // pet or its bubble (updated below as the mouse moves).
+        panel.ignoresMouseEvents = true
 
         scene.setSpecies(speciesID)
         scene.setStage(PetController.stage(forXP: xp))
@@ -876,6 +891,42 @@ final class PetController {
         if let screen = NSScreen.main {
             let vf = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: vf.maxX - size.width - 30, y: vf.minY + 10))
+        }
+
+        startMouseTracking()
+    }
+
+    deinit {
+        mouseMonitors.forEach { NSEvent.removeMonitor($0) }
+    }
+
+    // The window can't receive mouse-moved events while it's click-through
+    // (ignoresMouseEvents == true), so watch the cursor globally and locally
+    // and flip click-through on/off as it crosses the pet's visible pixels.
+    private func startMouseTracking() {
+        let events: NSEvent.EventTypeMask = [.mouseMoved]
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { [weak self] _ in
+            self?.updateClickThrough()
+        }) {
+            mouseMonitors.append(g)
+        }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: events, handler: { [weak self] event in
+            self?.updateClickThrough()
+            return event
+        }) {
+            mouseMonitors.append(l)
+        }
+    }
+
+    private func updateClickThrough() {
+        guard enabled, panel.isVisible else { return }
+        let screenPoint = NSEvent.mouseLocation
+        let winPoint = panel.convertPoint(fromScreen: screenPoint)
+        let viewPoint = skView.convert(winPoint, from: nil)
+        let scenePoint = skView.convert(viewPoint, to: scene)
+        let interactive = scene.isInteractive(at: scenePoint)
+        if panel.ignoresMouseEvents == interactive {
+            panel.ignoresMouseEvents = !interactive
         }
     }
 
