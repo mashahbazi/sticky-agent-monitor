@@ -66,6 +66,20 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   bubble has its own toggle ("Show the pet's speech bubble" / `"bubble":
   false`), so you can keep the octopus as ambient status and let the pop-out
   panel carry the list.
+- **petdex.dev pets**: any pet installed with `npx petdex install <slug>`
+  (from the 4,000+ gallery at [petdex.dev](https://petdex.dev)) appears in
+  the Pet menu and the Settings picker automatically (listed with their
+  install slug, because two installs can ship the same name), drawn from the
+  sprite-sheet atlas. No petdex runtime needed; only the art in
+  `~/.codex/pets/` is used. It mostly just sits there: the idle row plays
+  once every three seconds or so and the pet is perfectly still in between,
+  so a blink stays a blink instead of a fidget. A working fleet shows up as a
+  short burst of the running or reviewing row every few seconds, one waiting
+  session makes it wave once and then wait, an error makes it stumble once and
+  then wait, and finishing a task gets a jump. Drag it and it runs the way you
+  pull it, then stays exactly where you drop it; option-click pats it (a plain
+  click is the bubble's, unless there is no bubble to show). All species share
+  the size slider in Settings.
 - **Attention pop-out**: a floating panel that slides in under the menubar
   when an agent gets blocked (or errors, or finishes) and stays until the agent
   is handled, unlike a notification your brain learns to dismiss. Three
