@@ -27,7 +27,7 @@ private let pixelPalette: [Character: NSColor] = [
     "A": NSColor(red: 0.98, green: 0.72, blue: 0.18, alpha: 1),  // amber
     "L": NSColor(red: 0.35, green: 0.55, blue: 0.95, alpha: 1),  // blue
     "E": NSColor(red: 0.20, green: 0.75, blue: 0.40, alpha: 1),  // green
-    "T": NSColor(white: 1.0, alpha: 0.82),                       // bubble fill
+    "T": NSColor(white: 1.0, alpha: 1.0),                        // bubble fill
     "O": NSColor(red: 0.95, green: 0.55, blue: 0.20, alpha: 1),  // cat orange
     "F": NSColor(red: 0.98, green: 0.92, blue: 0.80, alpha: 1),  // cream (fur/belly)
     "N": NSColor(red: 0.35, green: 0.22, blue: 0.15, alpha: 1),  // dark brown (nose)
@@ -89,7 +89,8 @@ private let pixelFont: [Character: [String]] = [
     "'": [".X.", ".X.", "...", "...", "..."],
 ]
 
-// 5x5 status icons matching the menubar glyphs.
+// 5x5 status icons matching the menubar glyphs (used by the overview strip;
+// the bubble rows use emoji for their "why blocked" icons instead).
 private let pixelIcons: [Character: (rows: [String], color: Character)] = [
     "b": (["..X..", ".XXX.", ".XXX.", "XXXXX", "..X.."], "A"),  // bell, blocked
     "q": (["XXXXX", "X...X", "XXXXX", ".X...", "....."], "C"),  // balloon, asked
@@ -483,20 +484,20 @@ private func texture(from grid: [[Character]], scale: Int) -> SKTexture {
 // MARK: - Speech bubble
 
 // White bubble, black 1px border, notched pixel corners, tail bottom-right
-// pointing at the octopus. One line per session that wants you, with the icon
-// for why (bell = blocked, balloon = asked, check = just finished, cross =
-// errored); the
-// text itself is drawn as real monospaced labels over the sprite, so the
-// grid only carries the frame and icons.
-private func bubbleGrid(icons: [Character]) -> [[Character]] {
-    let lineH = 8   // row height: 5 icon px + 3 spacing
+// pointing at the octopus. One line per session that wants you, drawn entirely
+// as real monospaced labels over the sprite (icon + name + right-aligned age),
+// so the grid only carries the frame. The icon says which of the two kinds of
+// attention this is, and for a blocked agent it goes further and says which
+// gate: lock = permission, box = sandbox, gear = worker, speech = dialog,
+// question = needs an answer; balloon = merely asked, check = just finished,
+// hourglass = still running, cross = errored.
+private func bubbleGrid(rowCount: Int, textW: Int = 108) -> [[Character]] {
+    let lineH = 8   // row height in grid px
     let padding = 4
-    let iconW = 7   // 5 icon px + 2 gap
-    let textW = 76  // sized for ~28 chars of Menlo 12 at 2.5x display
-    let w = padding * 2 + iconW + textW
-    // Content is rows of 5px icons with 3px gaps between them; equal
-    // padding above and below keeps the rows vertically centered.
-    let h = padding * 2 + icons.count * lineH - 3
+    // Default textW fits emoji + ~28 chars of Menlo 12 at 2.5x display.
+    let w = padding * 2 + textW
+    // Equal padding above and below the rows keeps content centered.
+    let h = padding * 2 + rowCount * lineH - 3
     var grid = Array(repeating: Array(repeating: Character("."), count: w), count: h)
 
     for r in 0..<h {
@@ -509,10 +510,6 @@ private func bubbleGrid(icons: [Character]) -> [[Character]] {
                 || (r == h - 2 && (c == 1 || c == w - 2))
             grid[r][c] = border ? "B" : "T"
         }
-    }
-
-    for (i, icon) in icons.enumerated() {
-        stampIcon(icon, into: &grid, row: padding + i * lineH, col: padding)
     }
 
     // Tail, pointing down toward the octopus on the right side.
@@ -558,7 +555,9 @@ enum PetAgentKind { case busy, blocked, asked, done, error, more }
 struct PetBubbleRow {
     let id: String       // session fileID, used for click-to-attach
     let kind: PetAgentKind
-    let text: String
+    let text: String     // session name
+    let ago: String      // time in the blocked state, right-aligned
+    let why: String?     // shortWaitingFor tag, picks the row icon
 }
 
 struct PetStatusCounts {
@@ -575,13 +574,13 @@ private enum PetMode { case sleep, idle, busy, blocked, panic }
 
 final class PetScene: SKScene {
     var onRowClick: ((String) -> Void)?
-    var onBodyClick: (() -> Void)?
-    var onBubbleDismiss: (() -> Void)?
 
     private let octopus = SKSpriteNode()
     private let bubble = SKSpriteNode()
     private let overview = SKSpriteNode()
     private var bubbleRows: [PetBubbleRow] = []
+    private var bubbleCollapsed = false
+    private var collapsedIds: Set<String> = []
     private var mode: PetMode = .idle
     private var stage: PetStage = .hatchling
     private var species: PetSpecies = allPetSpecies[0]
@@ -691,46 +690,89 @@ final class PetScene: SKScene {
     }
 
     private func updateBubble(_ rows: [PetBubbleRow]) {
-        let sameIds = rows.map { $0.id } == bubbleRows.map { $0.id }
-        let sameText = rows.map { $0.text } == bubbleRows.map { $0.text }
+        let key: ([PetBubbleRow]) -> [String] = { list in
+            list.map { "\($0.id)|\($0.text)|\($0.ago)|\($0.why ?? "")" }
+        }
+        let unchanged = key(rows) == key(bubbleRows)
         bubbleRows = rows
         if rows.isEmpty {
             bubble.isHidden = true
+            bubbleCollapsed = false
+            collapsedIds = []
             return
         }
-        if !bubble.isHidden && sameIds && sameText { return }
-        let iconFor: (PetAgentKind) -> Character = { kind in
-            switch kind {
-            case .blocked: return "b"
-            case .asked: return "q"
-            case .done: return "c"
-            case .error: return "x"
-            case .busy: return "p"
-            case .more: return " "  // no pixel icon for this one
+
+        // A session that newly wants something re-opens a closed bubble; the
+        // same set of sessions stays closed. Busy rows are excluded from that
+        // test on purpose: they come and go constantly as agents start work,
+        // and letting them re-open the bubble would defeat closing it at all.
+        // Nothing about a busy agent is worth overriding the user for.
+        let ids = Set(rows.filter { $0.kind != .busy && $0.kind != .more }.map { $0.id })
+        if bubbleCollapsed && !ids.subtracting(collapsedIds).isEmpty {
+            bubbleCollapsed = false
+        }
+        if bubbleCollapsed {
+            bubble.isHidden = true
+            return
+        }
+
+        if !bubble.isHidden && unchanged { return }
+        // The kind decides the icon first, mirroring the menubar glyphs so the
+        // two readings agree (💬 = asked, ✅ = done, ⏳ = busy, ❌ = error).
+        // Only a genuinely blocked agent goes further and names its gate, which
+        // is the difference between "go approve something" and "go answer
+        // something", the whole reason a blocked row is worth interrupting for.
+        // An unrecognized gate name falls back to the plain bell.
+        let emojiFor: (PetBubbleRow) -> String = { row in
+            switch row.kind {
+            case .error: return "❌"
+            case .more:  return " "   // the "+N more" line carries no icon
+            case .done:  return "✅"
+            case .busy:  return "⏳"
+            case .asked: return "💬"
+            case .blocked:
+                switch row.why {
+                case nil, "question": return "❓"
+                case "permission":    return "🔒"
+                case "sandbox":       return "📦"
+                case "worker":        return "⚙️"
+                case "dialog":        return "🗨️"
+                default:              return "🔔"
+                }
             }
         }
-        let grid = bubbleGrid(icons: rows.map { iconFor($0.kind) })
+        let grid = bubbleGrid(rowCount: rows.count)
         let tex = texture(from: grid, scale: bubbleRenderScale)
         bubble.texture = tex
         bubble.size = CGSize(width: tex.size().width * bubbleDisplayFactor,
                              height: tex.size().height * bubbleDisplayFactor)
 
-        // Real monospaced text over the pixel frame, one label per row.
+        // Real monospaced text over the pixel frame: name left, age right.
         bubble.removeAllChildren()
         let w = bubble.size.width
         let h = bubble.size.height
+
         for (i, row) in rows.enumerated() {
-            let label = SKLabelNode(text: String(row.text.prefix(28)))
-            label.fontName = "Menlo"
-            label.fontSize = 12
-            label.fontColor = .black
-            label.horizontalAlignmentMode = .left
-            label.verticalAlignmentMode = .center
             let rowTop = (4 + CGFloat(i) * 8) * bubbleScale
-            label.position = CGPoint(
-                x: -w + 11 * bubbleScale + 4,       // after padding + icon
-                y: h - rowTop - 2.5 * bubbleScale)  // center of the 5px row
-            bubble.addChild(label)
+            let y = h - rowTop - 2.5 * bubbleScale  // center of the 5px row
+
+            let name = SKLabelNode(text: "\(emojiFor(row)) \(row.text.prefix(28))")
+            name.fontName = "Menlo"
+            name.fontSize = 12
+            name.fontColor = .black
+            name.horizontalAlignmentMode = .left
+            name.verticalAlignmentMode = .center
+            name.position = CGPoint(x: -w + 4 * bubbleScale + 4, y: y)
+            bubble.addChild(name)
+
+            let ago = SKLabelNode(text: row.ago)
+            ago.fontName = "Menlo"
+            ago.fontSize = 11
+            ago.fontColor = NSColor.black.withAlphaComponent(0.55)
+            ago.horizontalAlignmentMode = .right
+            ago.verticalAlignmentMode = .center
+            ago.position = CGPoint(x: -5 * bubbleScale, y: y)
+            bubble.addChild(ago)
         }
         bubble.position = CGPoint(x: size.width - 6, y: bodyCenter.y + 48)
         if bubble.isHidden {
@@ -797,6 +839,20 @@ final class PetScene: SKScene {
         return nodes(at: sceneLocation).contains { $0.name == "petBody" }
     }
 
+    // Tapping the octopus hides the bubble completely, or brings it back.
+    // A newly blocked session still re-opens it on its own.
+    private func toggleBubble() {
+        guard !bubbleRows.isEmpty else { return }
+        bubbleCollapsed.toggle()
+        if bubbleCollapsed {
+            collapsedIds = Set(bubbleRows.map { $0.id })
+            bubble.isHidden = true
+        } else {
+            bubble.isHidden = true  // force a fresh render with current rows
+            updateBubble(bubbleRows)
+        }
+    }
+
     private func bubbleRowIndex(at sceneLocation: CGPoint) -> Int? {
         guard !bubble.isHidden, bubble.contains(sceneLocation) else { return nil }
         let topY = bubble.position.y + bubble.size.height
@@ -817,28 +873,28 @@ final class PetScene: SKScene {
             onRowClick?(bubbleRows.first?.id ?? "")
             return
         }
-        if nodes(at: loc).contains(where: { $0.name == "petBody" }) {
-            // Click on the body opens the session menu; drag moves the window.
-            if let win = view?.window,
-               let next = win.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
-                if next.type == .leftMouseDragged {
-                    win.performDrag(with: event)
-                } else {
-                    onBodyClick?()
-                }
+        guard nodes(at: loc).contains(where: { $0.name == "petBody" }),
+              let win = view?.window else { return }
+        // Tap the body toggles the bubble; dragging the body moves the
+        // window. The drag is applied via setFrameOrigin, which skips the
+        // system's screen-edge clamping entirely.
+        let startMouse = NSEvent.mouseLocation
+        let startOrigin = win.frame.origin
+        while true {
+            guard let next = win.nextEvent(matching: [.leftMouseUp, .leftMouseDragged])
+            else { return }
+            if next.type == .leftMouseUp {
+                let moved = hypot(NSEvent.mouseLocation.x - startMouse.x,
+                                  NSEvent.mouseLocation.y - startMouse.y)
+                if moved < 3 { toggleBubble() }  // tap the pet = show/hide bubble
+                return
             }
-            return
+            let now = NSEvent.mouseLocation
+            win.setFrameOrigin(NSPoint(x: startOrigin.x + now.x - startMouse.x,
+                                       y: startOrigin.y + now.y - startMouse.y))
         }
-        view?.window?.performDrag(with: event)
     }
 
-    override func rightMouseDown(with event: NSEvent) {
-        let loc = event.location(in: self)
-        if !bubble.isHidden, bubble.contains(loc) {
-            onBubbleDismiss?()
-            bubble.isHidden = true
-        }
-    }
 }
 
 // MARK: - Controller
@@ -862,11 +918,11 @@ final class PetController {
     private(set) var speciesID: String
 
     var onAttach: ((String) -> Void)?
-    var onOpenMenu: (() -> Void)?
-    var onDismissBubble: (() -> Void)?
     var onXPChanged: ((Int) -> Void)?
+    var onMoved: ((NSPoint) -> Void)?
+    private var moveDebounce: Timer?
 
-    init(initialXP: Int, initialSpecies: String) {
+    init(initialXP: Int, initialSpecies: String, savedOrigin: NSPoint?) {
         xp = initialXP
         speciesID = petSpecies(withID: initialSpecies).id
 
@@ -901,15 +957,33 @@ final class PetController {
         scene.onRowClick = { [weak self] id in
             if !id.isEmpty { self?.onAttach?(id) }
         }
-        scene.onBodyClick = { [weak self] in self?.onOpenMenu?() }
-        scene.onBubbleDismiss = { [weak self] in self?.onDismissBubble?() }
 
-        if let screen = NSScreen.main {
+        // Restore the last dragged position if it's still on a screen;
+        // fall back to bottom-right otherwise (e.g. monitor unplugged).
+        let onSomeScreen = savedOrigin.map { origin in
+            NSScreen.screens.contains { $0.frame.intersects(
+                NSRect(origin: origin, size: size)) }
+        } ?? false
+        if let origin = savedOrigin, onSomeScreen {
+            panel.setFrameOrigin(origin)
+        } else if let screen = NSScreen.main {
             let vf = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: vf.maxX - size.width - 30, y: vf.minY + 10))
         }
 
         startMouseTracking()
+
+        // Persist the position after a drag settles, so the pet comes back
+        // where the user left it.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            self.moveDebounce?.invalidate()
+            self.moveDebounce = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
+                self.onMoved?(self.panel.frame.origin)
+            }
+        }
     }
 
     deinit {
