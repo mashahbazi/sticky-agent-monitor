@@ -40,8 +40,8 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   every state); when an agent is blocked it waves and shows a cartoony speech
   bubble listing the sessions that want you (pixel frame, monospaced text), each
   row an icon plus the name plus a right-aligned age. The icon mirrors the
-  menubar glyph for its state — `💬` asked, `✅` just finished, `⏳` still
-  running, `❌` errored — except for a blocked agent, which goes further and
+  menubar glyph for its state (`💬` asked, `✅` just finished, `⏳` still
+  running, `❌` errored), except for a blocked agent, which goes further and
   names its gate: `🔒` permission, `📦` sandbox, `⚙️` worker, `🗨️` dialog, `❓`
   needs an answer. That distinction is the difference between "go approve
   something" and "go answer something", which is the whole reason a blocked row
@@ -54,21 +54,29 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   bottom, under everything that wants something from you, and self-retiring rows
   show no age (a number ticking toward its own disappearance says nothing).
   Beyond `maxBubbleRows` the tail folds into a "+N more" line, so the busy rows
-  are what gets hidden first. Click a bubble line to attach, tap the octopus to
+  are what gets hidden first. Busy rows are the one category that wants nothing
+  from you, so they are also the one you can switch off on their own ("Also list
+  busy agents" / `"busyRows": false`), leaving the surfaces to the agents that
+  are actually waiting; the icon strip beside the pet still carries the count. Click a bubble line to attach, tap the octopus to
   hide or show the bubble, drag the octopus to move it; its position survives
   restarts and the window is click-through everywhere else. It sleeps
   when all is quiet, panics on errors, feeds on completed tasks (XP persisted
   in config) and earns a bandana at 25 completions and a top hat at 100.
-  Disable via Settings ("Show desktop pet") or `"pet": false` in the config.
-- **Attention pop-out**: with the pet disabled, a floating panel takes over
-  the speech bubble's job: it slides in under the menubar when an agent gets
-  blocked (or errors, or finishes) and stays until the agent is handled, unlike
-  a notification your brain learns to dismiss. Three headings, with the same
-  lifetimes as the speech bubble: "Blocked — needs you now" and "Still running"
-  hold, "Just finished" retires itself after 5 seconds. It never steals keyboard
-  focus;
-  clicking a row attaches, `✕` snoozes until the agent's status next
-  changes. Disable with `"popout": false` in the config file.
+  Disable the pet via Settings ("Show desktop pet") or `"pet": false`; the
+  bubble has its own toggle ("Show the pet's speech bubble" / `"bubble":
+  false`), so you can keep the octopus as ambient status and let the pop-out
+  panel carry the list.
+- **Attention pop-out**: a floating panel that slides in under the menubar
+  when an agent gets blocked (or errors, or finishes) and stays until the agent
+  is handled, unlike a notification your brain learns to dismiss. Three
+  headings, with the same lifetimes as the speech bubble: "Blocked - needs you
+  now" and "Still running" hold, "Just finished" retires itself after 5
+  seconds; "Still running" obeys the same `busyRows` toggle as the bubble, so
+  turning it off drops that heading here too.
+  It never steals keyboard focus; clicking a row attaches, `✕` snoozes
+  until the agent's status next changes. It is independent of the pet: both
+  surfaces can be on at once, either alone, or neither. Toggle it in Settings
+  ("Show attention pop-out panel") or with `"popout": false`.
 - **Keyboard-first attach**: menu items are numbered; plain `1`-`9` attaches
   instantly. Arrow keys + Enter work too. `a` opens the full `claude agents`
   TUI, `q` quits.
@@ -82,8 +90,11 @@ attach to a session, in a new iTerm tab, without touching the mouse.
   [`terminal-notifier`](https://github.com/julienXX/terminal-notifier)
   installed (`brew install terminal-notifier`), clicking the notification
   attaches straight to that agent. Without it, plain notifications still
-  work. Waiting/error states notify only when the pop-out panel is disabled;
-  otherwise the panel handles them and notifying too would double up.
+  work. Settings has three modes (`"notifications"` in the config):
+  `auto` (the default) only notifies when neither the pop-out panel nor the
+  speech bubble is on screen, so you are never told the same thing twice;
+  `always` notifies regardless, for when a banner is the signal you actually
+  react to; `never` stays silent and leaves it to the surfaces.
 - **Readable titles**: if a session hasn't been given a friendly name yet, the
   monitor recovers its original task description from the session transcript
   instead of showing a bare hash like `125f85a7`.
@@ -157,6 +168,21 @@ Tweak the constants near the top of `main.swift`:
 | `transientRowTTL`| `5.0`                | Seconds a finished agent's row shows |
 | `maxBubbleRows`  | `7`                  | Bubble rows before a "+N more" line  |
 | `hotKeyCode`     | `kVK_ANSI_A`         | Global hotkey key (with Ctrl+Alt)    |
+
+Runtime settings live in `~/.sticky-agent-monitor/config.json` and are written
+by the Settings window, so you rarely need to edit it by hand:
+
+| Key             | Default      | Description                                |
+| --------------- | ------------ | ------------------------------------------ |
+| `popout`        | `true`       | Show the attention pop-out panel           |
+| `pet`           | `true`       | Show the desktop pet                       |
+| `bubble`        | `true`       | Show the pet's speech bubble               |
+| `busyRows`      | `true`       | List still-running agents on both surfaces  |
+| `notifications` | `"auto"`     | `auto` / `always` / `never` (see above)    |
+| `hotkey`        | `ctrl+alt+a` | Global hotkey, e.g. `cmd+shift+k`          |
+| `petSpecies`    | `"octopus"`  | Which pet to render                        |
+| `petXP`         | `0`          | Completions fed to the pet, for its outfit |
+| `petX` / `petY` | unset        | Where you last dragged the pet             |
 
 ## How it works
 

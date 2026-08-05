@@ -721,7 +721,7 @@ final class PetScene: SKScene {
         // two readings agree (💬 = asked, ✅ = done, ⏳ = busy, ❌ = error).
         // Only a genuinely blocked agent goes further and names its gate, which
         // is the difference between "go approve something" and "go answer
-        // something" — the whole reason a blocked row is worth interrupting for.
+        // something", the whole reason a blocked row is worth interrupting for.
         // An unrecognized gate name falls back to the plain bell.
         let emojiFor: (PetBubbleRow) -> String = { row in
             switch row.kind {

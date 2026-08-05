@@ -110,6 +110,20 @@ func blockerReason(_ waitingFor: String?) -> String {
     }
 }
 
+// When to raise a system notification, independent of which visual surfaces are
+// on. "auto" is the default and the only one that reasons about them: it fills
+// the gap rather than duplicating what you can already see. "always" suits
+// anyone who treats Notification Centre as the real inbox and wants the log
+// regardless; "never" silences them outright.
+let notifyModes = ["auto", "always", "never"]
+// The "auto" title names the two surfaces it defers to, matching the wording of
+// their own checkboxes, so the rule needs no explanatory label beside it.
+let notifyModeLabels = [
+    "auto": "Only if panel and bubble are hidden",
+    "always": "Always",
+    "never": "Never",
+]
+
 // Statuses that trigger notifications when transitioned INTO. The buckets are
 // disjoint: every status belongs to exactly one.
 let notifyBlocked: Set<String> = ["waiting", "needs_input", "blocked"]
@@ -130,6 +144,9 @@ struct Session {
     // that didn't ("done") — but see `status`: it says nothing about whether
     // the agent is actually stuck.
     var state: String?
+    // The CLI's own `waitingFor`, overlaid alongside `state`. Only a fallback:
+    // see `waitingFor`.
+    var cliWaitingFor: String?
 
     var pid: Int32 { (raw["pid"] as? NSNumber)?.int32Value ?? 0 }
     var fileStatus: String { ((raw["status"] as? String) ?? "unknown").lowercased() }
@@ -137,7 +154,13 @@ struct Session {
     // Present only while the session sits at a gate it cannot pass on its
     // own: "permission prompt", "input needed", "dialog open", "worker
     // request", "sandbox request". This is the real "stuck" signal.
-    var waitingFor: String? { raw["waitingFor"] as? String }
+    //
+    // The session file is preferred because it is first-hand and updated by the
+    // session itself, but both it and the CLI report the gate only while one is
+    // actually open, so a missing value in either is silence rather than a "no".
+    // Taking the first that speaks means a gate has to be missing from both to
+    // be missed here.
+    var waitingFor: String? { (raw["waitingFor"] as? String) ?? cliWaitingFor }
 
     var status: String {
         // A live gate is the one unambiguous "needs you NOW", and the session
@@ -228,21 +251,27 @@ let claudePath: String? = {
     return found.isEmpty ? nil : found
 }()
 
-// sessionId -> state ("working" / "done" / "blocked" / "failed") from the
-// claude CLI. Note the CLI derives "blocked" from the agent's closing prose,
-// so it covers both a real gate and a mere trailing question; `Session.status`
-// uses the session file's `waitingFor` to separate the two. The CLI output
-// carries no `waitingFor` of its own — only the session file does.
-func fetchAgentStates() -> [String: String] {
+// sessionId -> (state, waitingFor) from the claude CLI. state is "working" /
+// "done" / "blocked" / "failed". Note the CLI derives "blocked" from the agent's
+// closing prose, so it covers both a real gate and a mere trailing question;
+// `waitingFor` is what separates the two.
+//
+// Both the session file and this CLI row can carry `waitingFor`, and neither
+// reports it reliably on its own: the field is only present while a session
+// actually sits at a gate, so an empty result never distinguishes "no gate"
+// from "this source didn't say". Collecting it here as well lets `Session`
+// prefer the file and fall back to the CLI, which is strictly better than
+// trusting either alone.
+func fetchAgentStates() -> [String: (state: String, waitingFor: String?)] {
     guard let claude = claudePath else { return [:] }
     let out = runCapture([claude, "agents", "--json"])
     guard let data = out.data(using: .utf8),
           let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
     else { return [:] }
-    var map: [String: String] = [:]
+    var map: [String: (state: String, waitingFor: String?)] = [:]
     for row in rows {
         if let sid = row["sessionId"] as? String, let state = row["state"] as? String {
-            map[sid] = state
+            map[sid] = (state, row["waitingFor"] as? String)
         }
     }
     return map
@@ -281,8 +310,9 @@ func loadSessions() -> [Session] {
             return states[sid] != nil
         }
         for i in sessions.indices {
-            if let sid = sessions[i].sessionId {
-                sessions[i].state = states[sid]
+            if let sid = sessions[i].sessionId, let info = states[sid] {
+                sessions[i].state = info.state
+                sessions[i].cliWaitingFor = info.waitingFor
             }
             // Surface gate names we haven't mapped yet, so gaps in
             // shortWaitingFor show up in the log instead of as a bare bell.
@@ -925,6 +955,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var currentHotKey: HotKeySpec?
     var lastConfigMtime: TimeInterval = -1
     var popoutEnabled = true
+    var bubbleEnabled = true
+    // Whether a still-running agent earns a row on the attention surfaces. It
+    // is the one category that wants nothing from you, so listing it is a
+    // progress readout rather than a call to act, and the icon strip beside the
+    // pet already carries that count. Off leaves the surfaces to the agents
+    // that are actually waiting on you.
+    var busyRowsEnabled = true
+    // "auto" (only what no visible surface is already showing), "always", or
+    // "never". Independent of the two surfaces on purpose: whether you want a
+    // system notification is a question about how you want to be interrupted,
+    // not a consequence of which panel happens to be switched on.
+    var notifyMode = "auto"
     var snoozed: Set<String> = []
     // fileID -> when its self-retiring row expires. See needySessions.
     var transientRows: [String: TimeInterval] = [:]
@@ -934,6 +976,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var recorderButton: HotKeyRecorderButton?
     var popoutCheckbox: NSButton?
     var petCheckbox: NSButton?
+    var bubbleCheckbox: NSButton?
+    var busyCheckbox: NSButton?
+    var notifyPopup: NSPopUpButton?
     var loginCheckbox: NSButton?
     var pet: PetController?
     var petEnabled = true
@@ -1010,6 +1055,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastConfigMtime = mtime
         let config = readConfig()
         popoutEnabled = (config["popout"] as? Bool) ?? true
+        bubbleEnabled = (config["bubble"] as? Bool) ?? true
+        busyRowsEnabled = (config["busyRows"] as? Bool) ?? true
+        let mode = (config["notifications"] as? String) ?? "auto"
+        notifyMode = notifyModes.contains(mode) ? mode : "auto"
         petEnabled = (config["pet"] as? Bool) ?? true
         pet?.setEnabled(petEnabled)
         petSpeciesID = (config["petSpecies"] as? String) ?? "octopus"
@@ -1042,7 +1091,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let needy = sessions.filter { s in
             let cat = statusMeta(s.status).cat
             if isTransientRow(cat) { return transientRows[s.fileID] != nil }
-            return cat == .blocked || cat == .error || cat == .busy
+            if cat == .busy { return busyRowsEnabled }
+            return cat == .blocked || cat == .error
         }
         let live = needy.filter { !snoozed.contains("\($0.fileID):\($0.status)") }
         snoozed.formIntersection(Set(needy.map { "\($0.fileID):\($0.status)" }))
@@ -1084,11 +1134,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // The pet's speech bubble takes over the attention role when it's
-    // enabled; the floating panel remains as the pet-less fallback.
+    // The panel and the pet's speech bubble are two independent surfaces for
+    // the same queue, each with its own switch. They used to be mutually
+    // exclusive (the panel hid itself whenever the pet was enabled), which
+    // meant turning the pet on silently took the panel away with no setting
+    // that would bring it back. They are orthogonal now: the panel is a
+    // precise list under the menubar, the bubble is an ambient glance next to
+    // the pet, and wanting one is not a statement about wanting the other.
     func updateAttentionPanel(_ sessions: [Session]) {
-        let usePanel = popoutEnabled && !petEnabled
-        attentionPanel.update(usePanel ? needySessions(sessions) : [])
+        attentionPanel.update(popoutEnabled ? needySessions(sessions) : [])
     }
 
     func snoozeCurrent() {
@@ -1110,7 +1164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             default: break
             }
         }
-        var rows: [PetBubbleRow] = popoutEnabled ? needySessions(sessions).map { s in
+        var rows: [PetBubbleRow] = bubbleEnabled ? needySessions(sessions).map { s in
             let cat = statusMeta(s.status).cat
             let kind: PetAgentKind
             switch cat {
@@ -1138,6 +1192,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pet?.update(counts: counts, rows: rows)
     }
 
+    // Whether a state change should also raise a system notification. Only
+    // "auto" cares whether a surface is already showing it; note the bubble
+    // counts only when the pet itself is enabled, since a disabled pet draws
+    // no bubble however the bubble switch is set.
+    func shouldNotify() -> Bool {
+        switch notifyMode {
+        case "always": return true
+        case "never":  return false
+        default:       return !(popoutEnabled || (petEnabled && bubbleEnabled))
+        }
+    }
+
     func checkNotifications(_ sessions: [Session]) {
         var current: [String: String] = [:]
         for s in sessions {
@@ -1145,30 +1211,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             current[s.fileID] = status
             guard let prev = prevStates[s.fileID] else { continue }
             let name = displayName(s)
-            // Blocked/error are the attention panel's job; notifying too
-            // would just double up. Only fall back to notifications for them
-            // when the pop-out is disabled. Finishing has no panel row, so it
-            // always notifies — and an agent that finished by asking is a
-            // finish, not an alarm: same "you can look whenever" tone, only
-            // the wording says a reply is expected.
+            // Under "auto", notifications are the fallback for what you cannot
+            // already see, nothing more. Every category now gets a row on some
+            // surface (blocked and errored hold one, asked and done get a
+            // self-retiring one), so whenever a surface is up, notifying as well
+            // is the same event told twice and the second telling is the
+            // intrusive one. With both surfaces off nothing else would mark the
+            // transition, so notifications carry the whole load. "always" and
+            // "never" opt out of that reasoning in either direction.
+            let wantNotify = shouldNotify()
             if notifyBlocked.contains(status) && !notifyBlocked.contains(prev) {
-                if !popoutEnabled {
+                if wantNotify {
                     notify(title: "Blocked",
                            message: "\(name) \(blockerReason(s.waitingFor))",
                            attachJobId: s.shortJobId)
                 }
             } else if notifyAsked.contains(status) && !notifyAsked.contains(prev) {
-                notify(title: "Waiting for your reply",
-                       message: "\(name) finished and asked you something",
-                       attachJobId: s.shortJobId)
+                if wantNotify {
+                    notify(title: "Waiting for your reply",
+                           message: "\(name) finished and asked you something",
+                           attachJobId: s.shortJobId)
+                }
                 showTransientRow(for: s.fileID)
                 pet?.gainXP()  // the turn still completed
             } else if notifyDone.contains(status) && !notifyDone.contains(prev) {
-                notify(title: "Completed", message: "\(name) finished", attachJobId: s.shortJobId)
+                if wantNotify {
+                    notify(title: "Completed", message: "\(name) finished",
+                           attachJobId: s.shortJobId)
+                }
                 showTransientRow(for: s.fileID)
                 pet?.gainXP()  // the pet feeds on completed tasks
             } else if notifyError.contains(status) && !notifyError.contains(prev) {
-                if !popoutEnabled {
+                if wantNotify {
                     notify(title: "Attention", message: "\(name) hit an error", attachJobId: s.shortJobId)
                 }
             }
@@ -1258,6 +1332,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorderButton?.displaySpec = currentHotKey?.display ?? configuredHotKeySpec()
         popoutCheckbox?.state = popoutEnabled ? .on : .off
         petCheckbox?.state = petEnabled ? .on : .off
+        bubbleCheckbox?.state = bubbleEnabled ? .on : .off
+        busyCheckbox?.state = busyRowsEnabled ? .on : .off
+        if let idx = notifyModes.firstIndex(of: notifyMode) {
+            notifyPopup?.selectItem(at: idx)
+        }
         if let idx = allPetSpecies.firstIndex(where: { $0.id == petSpeciesID }) {
             petPopup?.selectItem(at: idx)
         }
@@ -1289,10 +1368,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.applyHotKey(configuredHotKeySpec())
         }
 
-        let checkbox = NSButton(checkboxWithTitle: "Show pop-out panel when agents need input",
+        let checkbox = NSButton(checkboxWithTitle: "Show attention pop-out panel under the menubar",
                                 target: self, action: #selector(popoutToggled(_:)))
         let petBox = NSButton(checkboxWithTitle: "Show desktop pet",
                               target: self, action: #selector(petToggled(_:)))
+        let bubbleBox = NSButton(checkboxWithTitle: "Show the pet's speech bubble",
+                                 target: self, action: #selector(bubbleToggled(_:)))
+        let busyBox = NSButton(checkboxWithTitle: "Also list busy agents",
+                               target: self, action: #selector(busyRowsToggled(_:)))
         let loginBox = NSButton(checkboxWithTitle: "Start at login",
                                 target: self, action: #selector(loginToggled(_:)))
 
@@ -1308,6 +1391,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         petRow.orientation = .horizontal
         petRow.spacing = 8
 
+        let notifyLabel = NSTextField(labelWithString: "Notifications:")
+        let notifyPop = NSPopUpButton(frame: .zero, pullsDown: false)
+        notifyPop.target = self
+        notifyPop.action = #selector(notifyModeChanged(_:))
+        for (i, m) in notifyModes.enumerated() {
+            notifyPop.addItem(withTitle: notifyModeLabels[m] ?? m)
+            notifyPop.item(at: i)?.representedObject = m
+        }
+        let notifyRow = NSStackView(views: [notifyLabel, notifyPop])
+        notifyRow.orientation = .horizontal
+        notifyRow.spacing = 8
+
         let hotkeyLabel = NSTextField(labelWithString: "Global hotkey:")
         let hotkeyRow = NSStackView(views: [hotkeyLabel, recorder])
         hotkeyRow.orientation = .horizontal
@@ -1318,14 +1413,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
 
-        let stack = NSStackView(views: [hotkeyRow, checkbox, petBox, petRow, loginBox, hint])
+        // `hint` explains the recorder, so it is grouped tight under it rather
+        // than orphaned at the bottom of the window.
+        let hotkeyBox = NSStackView(views: [hotkeyRow, hint])
+        hotkeyBox.orientation = .vertical
+        hotkeyBox.alignment = .leading
+        hotkeyBox.spacing = 4
+
+        // The four surface toggles are one decision ("what shows up, where"), so
+        // they sit tighter together than the unrelated rows around them.
+        let surfacesBox = NSStackView(views: [checkbox, petBox, bubbleBox, busyBox])
+        surfacesBox.orientation = .vertical
+        surfacesBox.alignment = .leading
+        surfacesBox.spacing = 8
+
+        let stack = NSStackView(views: [hotkeyBox, surfacesBox, petRow, notifyRow, loginBox])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
 
+        // Sized by hand, not from `stack.fittingSize`: the stack reports a width
+        // narrower than its own widest child plus the insets, so fitting it
+        // squeezes the notification popup and runs the longest checkbox label
+        // into the right edge. The rows at their natural sizes need 392x282;
+        // keep main's 430 width so there is a real right margin.
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 245),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 290),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "sticky-agent-monitor"
         win.isReleasedWhenClosed = false
@@ -1336,12 +1450,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorderButton = recorder
         popoutCheckbox = checkbox
         petCheckbox = petBox
+        bubbleCheckbox = bubbleBox
+        busyCheckbox = busyBox
         petPopup = petPop
+        notifyPopup = notifyPop
         loginCheckbox = loginBox
+    }
+
+    @objc func notifyModeChanged(_ sender: NSPopUpButton) {
+        guard let mode = sender.selectedItem?.representedObject as? String else { return }
+        notifyMode = mode
+        writeConfig(["notifications": mode])
+        lastConfigMtime = configModTime()  // our own write, already applied
     }
 
     @objc func loginToggled(_ sender: NSButton) {
         setLoginItem(sender.state == .on)
+    }
+
+    @objc func bubbleToggled(_ sender: NSButton) {
+        bubbleEnabled = sender.state == .on
+        writeConfig(["bubble": bubbleEnabled])
+        lastConfigMtime = configModTime()  // our own write, already applied
+        updatePet(lastSessions)
+    }
+
+    // Busy rows appear on both surfaces, so redraw both rather than just the pet.
+    @objc func busyRowsToggled(_ sender: NSButton) {
+        busyRowsEnabled = sender.state == .on
+        writeConfig(["busyRows": busyRowsEnabled])
+        lastConfigMtime = configModTime()  // our own write, already applied
+        updatePet(lastSessions)
+        updateAttentionPanel(lastSessions)
     }
 
     @objc func petToggled(_ sender: NSButton) {
